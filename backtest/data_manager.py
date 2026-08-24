@@ -13,8 +13,12 @@ ROOT_DIR = os.path.dirname(BACKTEST_DIR)
 sys.path.insert(0, BACKTEST_DIR)
 
 from data_update import DataUpdate
+from products import require_products
 from roll_calendar import (
+    annotate_expiries,
     build_date_contract_map,
+    colliding_codes,
+    contract_feed_name,
     mapping_as_dates,
     normalize_contract_code,
 )
@@ -23,9 +27,10 @@ _PRICE_COLS = ['open', 'high', 'low', 'close', 'settle']
 _ALIGN_COLS = ['open', 'high', 'low', 'close', 'settle', 'oi', 'volume']
 
 
-class SAWeightedData(bt.feeds.PandasData):
+class FuturesDailyData(bt.feeds.PandasData):
     """
-    SA weighted data feed based on PandasData, adapted to the SA_weighted.csv format.
+    Daily futures feed based on PandasData.
+
     Columns: date, open, high, low, close, settle, oi, volume
 
     Extra custom line:
@@ -33,44 +38,60 @@ class SAWeightedData(bt.feeds.PandasData):
     Built-in line mapping:
       openinterest -> oi column
     """
-    # Add a custom `settle` line; oi maps to the built-in openinterest line.
     lines = ('settle',)
 
     params = (
-        ('datetime',     None),      # index is the date
+        ('datetime',     None),
         ('open',         'open'),
         ('high',         'high'),
         ('low',          'low'),
         ('close',        'close'),
         ('volume',       'volume'),
-        ('openinterest', 'oi'),      # built-in openinterest line reads the oi column
-        ('settle',       'settle'),  # custom settle line
+        ('openinterest', 'oi'),
+        ('settle',       'settle'),
     )
+
+
+# Backward-compatible alias
+SAWeightedData = FuturesDailyData
 
 
 class DataManager:
     """
     Data manager.
-    Loads, filters, and updates futures weighted data and contract-level bars.
+    Loads, filters, and updates futures weighted data and contract-level bars
+    for one or more registered products.
     """
 
     DATA_DIR = os.path.join(ROOT_DIR, 'data')
 
-    def __init__(self, symbol: str = 'SA', update: bool = False):
+    def __init__(self, symbols=None, symbol: str = None, update: bool = False):
         """
         Parameters
         ----------
-        symbol : str
-            Symbol code, e.g. 'SA'.
+        symbols : list[str], optional
+            Product codes to load, e.g. ``['SA', 'FG', 'CF']``.
+        symbol : str, optional
+            Single-product alias used when ``symbols`` is omitted.
         update : bool
             Whether to refresh data from the exchange (incremental: current year).
         """
-        self.symbol = symbol
-        self.weighted_path = os.path.join(self.DATA_DIR, f'{symbol}_weighted.csv')
-        self.raw_path = os.path.join(self.DATA_DIR, f'{symbol}.csv')
+        if symbols is None:
+            symbols = [symbol] if symbol else ['SA']
+        self.symbols = require_products(symbols)
+        self.symbol = self.symbols[0]
 
         if update:
             self._update_data()
+
+    def weighted_path(self, symbol: str = None) -> str:
+        return os.path.join(self.DATA_DIR, f'{self._sym(symbol)}_weighted.csv')
+
+    def raw_path(self, symbol: str = None) -> str:
+        return os.path.join(self.DATA_DIR, f'{self._sym(symbol)}.csv')
+
+    def _sym(self, symbol: str = None) -> str:
+        return (symbol or self.symbol).upper()
 
     # ------------------------------------------------------------------
     # Internal methods
@@ -78,20 +99,22 @@ class DataManager:
 
     def _update_data(self):
         """Refresh exchange history incrementally and regenerate weighted data."""
-        try:
-            print(f"[DataManager] Updating {self.symbol} data ...")
-            DataUpdate(self.symbol).update()
-            print(f"[DataManager] {self.symbol} data update done. Path: {self.weighted_path}")
-        except Exception as e:
-            print(f"[DataManager] Data update failed: {e}")
-            raise
+        for symbol in self.symbols:
+            try:
+                path = self.weighted_path(symbol)
+                print(f"[DataManager] Updating {symbol} data ...")
+                DataUpdate(symbol).update()
+                print(f"[DataManager] {symbol} data update done. Path: {path}")
+            except Exception as e:
+                print(f"[DataManager] Data update failed for {symbol}: {e}")
+                raise
 
-    def _feed_from_df(self, df: pd.DataFrame) -> SAWeightedData:
-        return SAWeightedData(dataname=df)
+    def _feed_from_df(self, df: pd.DataFrame) -> FuturesDailyData:
+        return FuturesDailyData(dataname=df)
 
     @staticmethod
     def _align_contract_ohlc(cdf: pd.DataFrame, index: pd.DatetimeIndex) -> pd.DataFrame:
-        """Reindex one contract onto the weighted calendar; ffill/bfill prices."""
+        """Reindex one contract onto the shared calendar; ffill/bfill prices."""
         frame = cdf.copy()
         for col in _ALIGN_COLS:
             if col not in frame.columns:
@@ -102,6 +125,22 @@ class DataManager:
         out['volume'] = out['volume'].fillna(0)
         return out
 
+    def _read_weighted(self, symbol: str) -> pd.DataFrame:
+        path = self.weighted_path(symbol)
+        if not os.path.exists(path):
+            raise FileNotFoundError(
+                f"Weighted data file not found: {path}\n"
+                "Run python backtest/data_update.py first, or pass update=True "
+                "when constructing DataManager."
+            )
+
+        df = pd.read_csv(path, parse_dates=['date'])
+        df.set_index('date', inplace=True)
+        df.index = pd.to_datetime(df.index).normalize()
+        df = df[~df.index.duplicated(keep='last')]
+        df.sort_index(inplace=True)
+        return df
+
     # ------------------------------------------------------------------
     # Public methods
     # ------------------------------------------------------------------
@@ -110,6 +149,7 @@ class DataManager:
         self,
         start_date: str = None,
         end_date: str = None,
+        symbol: str = None,
     ) -> pd.DataFrame:
         """
         Load the weighted CSV data and return a DataFrame filtered by date.
@@ -120,26 +160,17 @@ class DataManager:
             Start date, formatted as 'YYYY-MM-DD'.
         end_date : str, optional
             End date, formatted as 'YYYY-MM-DD'.
+        symbol : str, optional
+            Product code. Defaults to the first loaded symbol.
 
         Returns
         -------
         pd.DataFrame
             Columns: date(index), open, high, low, close, settle, oi, volume.
         """
-        if not os.path.exists(self.weighted_path):
-            raise FileNotFoundError(
-                f"Weighted data file not found: {self.weighted_path}\n"
-                "Run python backtest/data_update.py first, or pass update=True "
-                "when constructing DataManager."
-            )
+        symbol = self._sym(symbol)
+        df = self._read_weighted(symbol)
 
-        df = pd.read_csv(self.weighted_path, parse_dates=['date'])
-        df.set_index('date', inplace=True)
-        df.index = pd.to_datetime(df.index).normalize()
-        df = df[~df.index.duplicated(keep='last')]
-        df.sort_index(inplace=True)
-
-        # Date filter
         if start_date:
             df = df[df.index >= pd.to_datetime(start_date)]
         if end_date:
@@ -147,25 +178,27 @@ class DataManager:
 
         if df.empty:
             raise ValueError(
-                f"Filtered data is empty. Check that the date range "
+                f"Filtered data is empty for {symbol}. Check that the date range "
                 f"[{start_date}, {end_date}] falls within the available data."
             )
 
         return df
 
-    def load_contracts_dataframe(self) -> pd.DataFrame:
+    def load_contracts_dataframe(self, symbol: str = None) -> pd.DataFrame:
         """Load contract-level CZCE history from ``data/{symbol}.csv``."""
-        if not os.path.exists(self.raw_path):
+        symbol = self._sym(symbol)
+        path = self.raw_path(symbol)
+        if not os.path.exists(path):
             raise FileNotFoundError(
-                f"Contract data file not found: {self.raw_path}\n"
+                f"Contract data file not found: {path}\n"
                 "Run python backtest/data_update.py first, or pass update=True "
                 "when constructing DataManager."
             )
 
-        df = pd.read_csv(self.raw_path)
+        df = pd.read_csv(path)
         if 'date' not in df.columns or 'contract' not in df.columns:
             raise ValueError(
-                f"{self.raw_path} must contain 'date' and 'contract' columns"
+                f"{path} must contain 'date' and 'contract' columns"
             )
         df['date'] = pd.to_datetime(df['date'].astype(str), errors='coerce')
         df = df.dropna(subset=['date'])
@@ -178,7 +211,8 @@ class DataManager:
         self,
         start_date: str = None,
         end_date: str = None,
-    ) -> SAWeightedData:
+        symbol: str = None,
+    ) -> FuturesDailyData:
         """
         Return a data feed that can be passed directly to backtrader's Cerebro.
 
@@ -186,73 +220,93 @@ class DataManager:
         ----------
         start_date : str, optional
         end_date : str, optional
+        symbol : str, optional
 
         Returns
         -------
-        SAWeightedData
+        FuturesDailyData
         """
-        df = self.load_dataframe(start_date, end_date)
-        feed = SAWeightedData(dataname=df)
-        return feed
+        df = self.load_dataframe(start_date, end_date, symbol=symbol)
+        return FuturesDailyData(dataname=df)
 
     @staticmethod
     def _codes_in_window(raw: pd.DataFrame, index: pd.DatetimeIndex) -> list:
-        """Return contract codes with at least one bar inside ``index``, first-seen order."""
+        """Return feed names for contract segments that print inside ``index``."""
         if raw.empty or index.empty:
             return []
         start, end = index.min(), index.max()
-        subset = raw[(raw['date'] >= start) & (raw['date'] <= end)]
-        codes = []
+        df = raw if 'expiry' in raw.columns else annotate_expiries(raw)
+        window = df[(df['date'] >= start) & (df['date'] <= end)]
+        colliding = colliding_codes(df, start, end)
+        names = []
         seen = set()
-        for code in subset['contract']:
-            if code in seen:
+        for code, expiry in zip(window['contract'], window['expiry']):
+            name = contract_feed_name(code, expiry, colliding)
+            if name in seen:
                 continue
-            seen.add(code)
-            codes.append(code)
-        return codes
+            seen.add(name)
+            names.append(name)
+        return names
 
-    def _align_contracts(self, raw: pd.DataFrame, index: pd.DatetimeIndex,
-                         codes: list) -> tuple:
-        """Align listed contracts onto ``index``. Returns (feeds, aligned_frames)."""
+    def _contract_segments(
+        self, raw: pd.DataFrame, index: pd.DatetimeIndex
+    ) -> list:
+        """Split ``raw`` into (feed_name, frame) pairs for one backtest window.
+
+        Same 3-digit code in two decades becomes two segments so 2015 FG501
+        prices are not ffilled into the 2025 FG501 feed.
+        """
+        if raw.empty or index.empty:
+            return []
+        start, end = index.min(), index.max()
+        df = raw if 'expiry' in raw.columns else annotate_expiries(raw)
+        window = df[(df['date'] >= start) & (df['date'] <= end)]
+        colliding = colliding_codes(df, start, end)
+        segments = []
+        seen = set()
+        for (code, expiry), grp in window.groupby(['contract', 'expiry'], sort=False):
+            name = contract_feed_name(code, expiry, colliding)
+            if name in seen:
+                continue
+            seen.add(name)
+            segments.append((name, grp))
+        return segments
+
+    def _align_contracts(self, segments: list, index: pd.DatetimeIndex,
+                         symbol: str) -> tuple:
+        """Align listed contract segments onto ``index``. Returns (feeds, aligned_frames)."""
         contract_feeds = {}
         aligned = {}
-        for code in codes:
-            cdf = raw[raw['contract'] == code].copy()
+        for name, cdf in segments:
             if cdf.empty:
-                print(f"[DataManager] Skipping {code}: no rows in SA.csv")
+                print(f"[DataManager] Skipping {name}: no rows in {symbol}.csv")
                 continue
-            cdf = cdf.set_index('date').sort_index()
-            cdf.index = pd.to_datetime(cdf.index).normalize()
-            cdf = cdf[~cdf.index.duplicated(keep='last')]
-            aligned_df = self._align_contract_ohlc(cdf, index)
+            frame = cdf.copy()
+            frame = frame.set_index('date').sort_index()
+            frame.index = pd.to_datetime(frame.index).normalize()
+            frame = frame[~frame.index.duplicated(keep='last')]
+            aligned_df = self._align_contract_ohlc(frame, index)
             if aligned_df[_PRICE_COLS].isna().all().all():
-                print(f"[DataManager] Skipping {code}: no usable OHLC after align")
+                print(f"[DataManager] Skipping {name}: no usable OHLC after align")
                 continue
-            aligned[code] = aligned_df
-            contract_feeds[code] = self._feed_from_df(aligned_df)
+            aligned[name] = aligned_df
+            contract_feeds[name] = self._feed_from_df(aligned_df)
         return contract_feeds, aligned
 
-    def get_contract_bundle(
+    def _bundle_symbol(
         self,
-        start_date: str = None,
-        end_date: str = None,
+        symbol: str,
+        weighted_src: pd.DataFrame,
+        calendar: pd.DatetimeIndex,
+        first_print,
     ) -> dict:
-        """Build weighted + all real-contract feeds for a backtest window.
+        """Build weighted + contract feeds for one product on ``calendar``."""
+        raw = annotate_expiries(self.load_contracts_dataframe(symbol))
+        weighted_df = self._align_contract_ohlc(weighted_src, calendar)
 
-        Every SA contract that prints inside the window is aligned onto the
-        weighted calendar so the strategy can read it. Calendar 01/05/09
-        contracts used for execution are a subset of that list.
-
-        Returns
-        -------
-        dict
-            weighted_df, weighted_feed, contract_feeds, contract_by_date,
-            calendar_codes, exec_price_df
-        """
-        weighted_df = self.load_dataframe(start_date, end_date)
-        raw = self.load_contracts_dataframe()
-
-        mapping = build_date_contract_map(weighted_df.index, raw)
+        mapping = build_date_contract_map(
+            calendar, raw, listed_from=first_print
+        )
         calendar_codes = []
         seen_cal = set()
         for code in mapping.values():
@@ -262,47 +316,58 @@ class DataManager:
 
         if not calendar_codes:
             raise ValueError(
-                "Roll calendar produced no contracts. Check data/SA.csv coverage."
+                f"Roll calendar produced no contracts for {symbol}. "
+                f"Check data/{symbol}.csv coverage."
             )
 
-        codes = self._codes_in_window(raw, weighted_df.index)
-        seen = set(codes)
+        segments = self._contract_segments(raw, calendar)
+        names = [name for name, _ in segments]
+        seen = set(names)
+        extra = []
         for code in calendar_codes:
             if code not in seen:
-                codes.append(code)
+                extra.append(code)
                 seen.add(code)
+        if extra:
+            # Calendar name missing from window segments: include matching rows
+            colliding = colliding_codes(raw, calendar.min(), calendar.max())
+            by_name = {}
+            for (code, expiry), grp in raw.groupby(['contract', 'expiry'], sort=False):
+                by_name[contract_feed_name(code, expiry, colliding)] = grp
+            for name in extra:
+                if name in by_name:
+                    segments.append((name, by_name[name]))
 
         contract_feeds, aligned = self._align_contracts(
-            raw, weighted_df.index, codes
+            segments, calendar, symbol
         )
 
         missing = [c for c in calendar_codes if c not in contract_feeds]
         if missing:
             raise ValueError(
-                f"Calendar contracts have no aligned OHLC: {missing}"
+                f"{symbol} calendar contracts have no aligned OHLC: {missing}"
             )
 
         exec_close = []
         exec_code = []
-        for dt in weighted_df.index:
+        for dt in calendar:
             key = pd.Timestamp(dt).normalize()
             code = mapping.get(key)
-            if code is None:
-                raise KeyError(
-                    f"No calendar contract mapped for {key.date()}; "
-                    "check data/SA.csv coverage"
-                )
+            if code is None or code not in aligned:
+                exec_close.append(float('nan'))
+                exec_code.append('')
+                continue
             exec_close.append(float(aligned[code].loc[dt, 'close']))
             exec_code.append(code)
         exec_price_df = pd.DataFrame(
             {'close': exec_close, 'contract': exec_code},
-            index=weighted_df.index,
+            index=calendar,
         )
 
         n_cal = len(calendar_codes)
         n_all = len(contract_feeds)
         print(
-            f"[DataManager] Feeds: weighted + {n_all} contracts "
+            f"[DataManager] {symbol} feeds: weighted + {n_all} contracts "
             f"({n_cal} calendar: {', '.join(calendar_codes)})"
         )
 
@@ -313,8 +378,78 @@ class DataManager:
             'contract_by_date': mapping_as_dates(mapping),
             'calendar_codes': calendar_codes,
             'exec_price_df': exec_price_df,
+            'first_print': first_print,
         }
 
-    def get_raw_dataframe(self) -> pd.DataFrame:
+    def get_universe_bundle(
+        self,
+        start_date: str = None,
+        end_date: str = None,
+    ) -> dict:
+        """Build weighted + real-contract feeds for every loaded product.
+
+        All products are aligned onto the union of their weighted calendars
+        inside the backtest window so Backtrader can step them together.
+
+        Returns
+        -------
+        dict
+            symbols, calendar, products[symbol] -> per-product bundle
+        """
+        frames = {}
+        first_prints = {}
+        for symbol in self.symbols:
+            full = self._read_weighted(symbol)
+            if full.empty:
+                raise ValueError(f'{symbol} weighted data is empty')
+            first_prints[symbol] = pd.Timestamp(full.index.min()).date()
+            df = full
+            if start_date:
+                df = df[df.index >= pd.to_datetime(start_date)]
+            if end_date:
+                df = df[df.index <= pd.to_datetime(end_date)]
+            if df.empty:
+                raise ValueError(
+                    f"Filtered data is empty for {symbol}. Check that the date range "
+                    f"[{start_date}, {end_date}] falls within the available data."
+                )
+            frames[symbol] = df
+
+        calendar = frames[self.symbols[0]].index
+        for symbol in self.symbols[1:]:
+            calendar = calendar.union(frames[symbol].index)
+        calendar = calendar.sort_values()
+
+        products = {}
+        for symbol in self.symbols:
+            products[symbol] = self._bundle_symbol(
+                symbol, frames[symbol], calendar, first_prints[symbol]
+            )
+
+        return {
+            'symbols': list(self.symbols),
+            'calendar': calendar,
+            'products': products,
+        }
+
+    def get_contract_bundle(
+        self,
+        start_date: str = None,
+        end_date: str = None,
+        symbol: str = None,
+    ) -> dict:
+        """Build weighted + all real-contract feeds for one product.
+
+        Prefer ``get_universe_bundle`` when loading more than one symbol.
+        """
+        symbol = self._sym(symbol)
+        if self.symbols == [symbol]:
+            universe = self.get_universe_bundle(start_date, end_date)
+            return universe['products'][symbol]
+        dm = DataManager(symbols=[symbol], update=False)
+        universe = dm.get_universe_bundle(start_date, end_date)
+        return universe['products'][symbol]
+
+    def get_raw_dataframe(self, symbol: str = None) -> pd.DataFrame:
         """Return the full unfiltered weighted DataFrame (useful for plotting, etc.)."""
-        return self.load_dataframe()
+        return self.load_dataframe(symbol=symbol)

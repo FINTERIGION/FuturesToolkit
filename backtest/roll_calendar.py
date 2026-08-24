@@ -1,12 +1,12 @@
-"""SA calendar-spread roll: map trading dates to the executable CZCE contract.
+"""Calendar-spread roll: map trading dates to the executable CZCE contract.
 
 Calendar (calendar months, not delivery months):
   Dec / Jan / Feb / Mar  ->  May contract (Dec uses next year's May)
   Apr / May / Jun / Jul  ->  September contract (same year)
   Aug / Sep / Oct / Nov  ->  next year's January contract
 
-Contract codes are resolved from ``data/SA.csv`` (CZCE 3-digit YMM or
-4-digit YYMM suffixes such as SA509 / SA2505), not constructed by hand.
+Contract codes are resolved from ``data/{symbol}.csv`` (CZCE 3-digit YMM or
+4-digit YYMM suffixes such as SA509 / FG2505), not constructed by hand.
 """
 
 from __future__ import annotations
@@ -92,58 +92,100 @@ def infer_code_expiry(code: str, sample_dates: Iterable) -> Optional[Expiry]:
     return parse_contract_expiry(code, first)
 
 
+def annotate_expiries(contracts_df: pd.DataFrame) -> pd.DataFrame:
+    """Add an ``expiry`` column parsed with each row's own date as ``asof``.
+
+    CZCE 3-digit codes wrap every 10 years (FG501 is 2015-01 and 2025-01).
+    Expiry must be parsed per print date, not from the code's first-ever bar.
+    """
+    df = contracts_df.copy()
+    df['date'] = pd.to_datetime(df['date']).dt.normalize()
+    df['contract'] = df['contract'].map(normalize_contract_code)
+    df = df.dropna(subset=['date', 'contract'])
+    df['expiry'] = [
+        parse_contract_expiry(code, dt)
+        for code, dt in zip(df['contract'], df['date'])
+    ]
+    return df.dropna(subset=['expiry'])
+
+
+def colliding_codes(df: pd.DataFrame, start, end) -> set:
+    """Codes that map to more than one expiry inside ``[start, end]``."""
+    start = pd.Timestamp(start).normalize()
+    end = pd.Timestamp(end).normalize()
+    window = df[(df['date'] >= start) & (df['date'] <= end)]
+    if window.empty or 'expiry' not in window.columns:
+        return set()
+    counts = window.groupby('contract')['expiry'].nunique()
+    return set(counts[counts > 1].index)
+
+
+def contract_feed_name(code: str, expiry: Expiry, colliding: set) -> str:
+    """Unique feed name; suffix YYYYMM when the 3-digit code is reused."""
+    if code in colliding:
+        year, month = expiry
+        return f'{code}_{year}{month:02d}'
+    return code
+
+
 def build_date_contract_map(
     trading_index: Iterable,
     contracts_df: pd.DataFrame,
     warn: bool = True,
+    listed_from=None,
 ) -> Dict[Hashable, str]:
-    """Map each trading date to the calendar contract code present in ``contracts_df``.
+    """Map each trading date to the calendar contract feed name.
 
     ``contracts_df`` must contain ``date`` and ``contract`` columns.
+    Expiry is parsed per row so 3-digit codes that wrap every decade
+    (FG501 in 2015 vs 2025) resolve independently.
+
     If the target contract has no row on that date, the previous mapped
     contract is kept and a warning is printed (once per target expiry).
+    Dates before ``listed_from`` (product listing) are skipped.
     """
     if contracts_df.empty:
         raise ValueError("contracts_df is empty; cannot build a roll calendar")
 
-    df = contracts_df.copy()
-    df['date'] = pd.to_datetime(df['date']).dt.normalize()
-    df['contract'] = df['contract'].map(normalize_contract_code)
+    index = pd.DatetimeIndex(pd.to_datetime(list(trading_index))).normalize()
+    df = annotate_expiries(contracts_df)
+    if df.empty:
+        raise ValueError("contracts_df has no parsable contract expiries")
 
-    code_expiry: Dict[str, Expiry] = {}
-    for code, grp in df.groupby('contract', sort=False):
-        expiry = infer_code_expiry(code, grp['date'])
-        if expiry is not None:
-            code_expiry[code] = expiry
+    colliding = colliding_codes(df, index.min(), index.max()) if len(index) else set()
+    listed = (
+        pd.Timestamp(listed_from).normalize() if listed_from is not None else None
+    )
 
-    expiry_to_codes: Dict[Expiry, list] = {}
-    for code, expiry in code_expiry.items():
-        expiry_to_codes.setdefault(expiry, []).append(code)
-
-    dates_by_code = {
-        code: set(pd.to_datetime(grp['date']).dt.normalize())
-        for code, grp in df.groupby('contract', sort=False)
-    }
+    dates_by_key: Dict[Tuple[Expiry, str], set] = {}
+    names_by_expiry: Dict[Expiry, list] = {}
+    for expiry, code, dt in zip(df['expiry'], df['contract'], df['date']):
+        name = contract_feed_name(code, expiry, colliding)
+        dates_by_key.setdefault((expiry, name), set()).add(dt)
+        bucket = names_by_expiry.setdefault(expiry, [])
+        if name not in bucket:
+            bucket.append(name)
 
     mapping: Dict[Hashable, str] = {}
     prev_code: Optional[str] = None
     warned_expiries = set()
 
-    for raw_dt in trading_index:
-        dt = pd.Timestamp(raw_dt).normalize()
+    for dt in index:
+        if listed is not None and dt < listed:
+            continue
         expiry = target_expiry(dt)
-        candidates = expiry_to_codes.get(expiry, [])
+        candidates = names_by_expiry.get(expiry, [])
 
         code = None
         for cand in candidates:
-            if dt in dates_by_code.get(cand, ()):
+            if dt in dates_by_key.get((expiry, cand), ()):
                 code = cand
                 break
         if code is None and candidates:
             # Listed, but no print that session — still tradable after ffill
             # if it has any history on or before this date.
             for cand in candidates:
-                earlier = {d for d in dates_by_code.get(cand, ()) if d <= dt}
+                earlier = {d for d in dates_by_key.get((expiry, cand), ()) if d <= dt}
                 if earlier:
                     code = cand
                     break

@@ -12,6 +12,7 @@ Directory structure:
     strategies/        <- Base class, example strategies, and private modules
     data_update.py     <- CZCE download & OI-weighted aggregation
     data_manager.py    <- Data management module
+    products.py        <- CZCE product registry (SA / FG / CF)
     roll_calendar.py   <- May/Sep/Jan contract calendar
     backtest_engine.py <- Backtest engine and metrics calculation
     plotting.py        <- Chart plotting module
@@ -26,17 +27,16 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from data_manager   import DataManager
+from data_manager    import DataManager
 from backtest_engine import BacktestEngine
-from plotting       import BacktestPlotter
+from plotting        import BacktestPlotter
+from products        import require_products
 
 # Import strategy (change here to pick a different strategy)
 # Public examples:
 #   from strategies.double_ma import DoubleMaStrategy
 #   from strategies.rsi_mean_reversion import RsiMeanReversionStrategy
 #   from strategies.my_strategy import MyStrategy
-# Private strategies (extra files under strategies/, gitignored):
-#   from strategies.your_strategy import YourStrategy
 from strategies.double_ma import DoubleMaStrategy
 
 
@@ -50,10 +50,14 @@ STRATEGY = DoubleMaStrategy
 
 # --- Strategy-specific parameters (match the strategy's `params`; leave empty to use defaults) ---
 STRATEGY_PARAMS = {
-    # Defaults: fast_period=5, slow_period=20
-    # 'fast_period': 5,
-    # 'slow_period': 20,
+    # Defaults: symbol='SA', fast_period=5, slow_period=20
 }
+
+# --- Products ---
+# Feeds loaded for the run (weighted + all real contracts per product).
+# Single-product strategies trade STRATEGY_PARAMS['symbol'] (or the class default).
+# Multi-product strategies call buy_signal(symbol='FG') / sell_signal(symbol='CF').
+SYMBOLS = ['SA', 'FG', 'CF']
 
 # --- Backtest range ---
 START_DATE = '2020-01-01'            # Start date 'YYYY-MM-DD'
@@ -61,14 +65,12 @@ END_DATE   = '2026-12-31'            # End date   'YYYY-MM-DD'
 
 # --- Capital and trading parameters ---
 INITIAL_CASH         = 100000        # Initial cash (CNY)
-COMMISSION_RATE      = 0.0002        # Commission rate (0.02%)
-SLIPPAGE             = 0.0           # Slippage as fraction of price (0 = none; 0.0001 = 1bp)
-MARGIN_RATE          = 0.15          # Margin ratio (15%)
-CONTRACT_MULTIPLIER  = 20            # Contract multiplier (tons per lot)
+SLIPPAGE             = 0.0           # Slippage in price points (0 = none; 1 = 1 point worse)
 TRADE_SIZE           = 1             # Lots per trade
+# Multiplier / margin / commission come from products.py (per product)
 
 # --- Execution ---
-# True: signals from OI-weighted bars; fills on calendar contracts (05/09/01)
+# True: signals from OI-weighted bars; fills on calendar contracts (01/05/09)
 # False: signals and fills both on the weighted series
 # Either way, the strategy receives weighted + all real contracts as feeds.
 EXECUTE_ON_CONTRACTS = True
@@ -204,46 +206,41 @@ def _print_alpha_report(alpha_log: list, results_dir: str, strategy_name: str) -
 # ==============================================================================
 
 def main():
+    symbols = require_products(SYMBOLS)
     print("=" * 60)
-    print(f"  SA Futures Backtest Framework")
+    print(f"  CZCE Futures Backtest Framework")
+    print(f"  Products: {', '.join(symbols)}")
     print(f"  Strategy: {STRATEGY.__name__}  [{START_DATE} -> {END_DATE}]")
     exec_mode = (
         "weighted signals + calendar contracts"
         if EXECUTE_ON_CONTRACTS else "weighted only"
     )
     print(f"  Execution: {exec_mode}")
-    slip_text = "off" if not SLIPPAGE else f"{SLIPPAGE:g} (fraction of price)"
+    slip_text = "off" if not SLIPPAGE else f"{SLIPPAGE:g} (price points)"
     print(f"  Slippage: {slip_text}")
     print("=" * 60)
 
     # 1. Load data
     print("\n[1/4] Loading data ...")
-    dm = DataManager(symbol='SA', update=UPDATE_DATA)
-    bundle = dm.get_contract_bundle(start_date=START_DATE, end_date=END_DATE)
-    data_feed = bundle['weighted_feed']
-    price_df = bundle['weighted_df']
-    contract_feeds = bundle['contract_feeds']
-    contract_by_date = bundle['contract_by_date']
-    exec_price_df = bundle['exec_price_df']
+    dm = DataManager(symbols=symbols, update=UPDATE_DATA)
+    universe = dm.get_universe_bundle(start_date=START_DATE, end_date=END_DATE)
 
     # 2. Configure backtest engine
     print("[2/4] Configuring backtest engine ...")
     config = {
         'initial_cash':          INITIAL_CASH,
-        'commission_rate':       COMMISSION_RATE,
-        'margin_rate':           MARGIN_RATE,
-        'contract_multiplier':   CONTRACT_MULTIPLIER,
         'trade_size':            TRADE_SIZE,
         'slippage':              SLIPPAGE,
         'strategy_params':       STRATEGY_PARAMS,
         'results_dir':           RESULTS_DIR,
         'strategy_name':         STRATEGY_NAME,
         'execute_on_contracts':  EXECUTE_ON_CONTRACTS,
-        'contract_by_date':      contract_by_date,
     }
-    engine = BacktestEngine(
-        STRATEGY, data_feed, config, contract_feeds=contract_feeds
-    )
+    engine = BacktestEngine(STRATEGY, universe, config)
+    default_symbol = engine.default_symbol
+    print(f"  Default trade symbol: {default_symbol}")
+    price_df = universe['products'][default_symbol]['weighted_df']
+    exec_price_df = universe['products'][default_symbol]['exec_price_df']
 
     # 3. Run backtest
     print("[3/4] Running backtest ...\n")
@@ -257,7 +254,10 @@ def main():
 
     # 4. Plot charts
     print("\n[4/4] Plotting charts ...")
-    signal_log = result['strat'].signal_log
+    signal_log = [
+        sig for sig in result['strat'].signal_log
+        if sig.get('symbol', default_symbol) == default_symbol
+    ]
     plotter = BacktestPlotter(
         equity_records = result['equity_records'],
         trade_logs     = result['trade_logs'],

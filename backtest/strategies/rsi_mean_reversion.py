@@ -16,6 +16,7 @@ class RsiMeanReversionStrategy(FuturesStrategyBase):
     """
 
     params = (
+        ('symbol', 'SA'),
         ('rsi_period', 14),
         ('oversold', 30),
         ('overbought', 70),

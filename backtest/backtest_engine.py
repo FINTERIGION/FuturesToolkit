@@ -11,10 +11,16 @@ import os
 import math
 import datetime
 import csv
+import sys
 import backtrader as bt
 import backtrader.analyzers as btanalyzers
 import pandas as pd
 import numpy as np
+
+BACKTEST_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, BACKTEST_DIR)
+
+from products import normalize_symbol, parse_product, product_costs, weighted_feed_name
 
 
 # ==============================================================================
@@ -26,11 +32,15 @@ class FuturesCommissionInfo(bt.CommissionInfo):
 
     Backtrader's ``margin`` parameter is an absolute currency amount per lot,
     not a margin ratio. ``get_margin`` keeps the required margin dynamic as
-    the price changes, and the fee is charged on contract notional.
+    the price changes.
+
+    Fee is either a fraction of notional (``per_lot=False``) or a fixed
+    CNY amount per lot (``per_lot=True``).
     """
 
     params = (
         ('margin_rate', 0.10),
+        ('per_lot', False),
     )
 
     def get_margin(self, price):
@@ -38,8 +48,10 @@ class FuturesCommissionInfo(bt.CommissionInfo):
         return price * self.p.mult * self.p.margin_rate
 
     def _getcommission(self, size, price, pseudoexec):
-        """Return fee: lots × price × multiplier × commission rate."""
-        return abs(size) * price * self.p.mult * self.p.commission
+        lots = abs(size)
+        if self.p.per_lot:
+            return lots * self.p.commission
+        return lots * price * self.p.mult * self.p.commission
 
 
 class DailyEquityAnalyzer(bt.Analyzer):
@@ -66,6 +78,15 @@ class DailyEquityAnalyzer(bt.Analyzer):
 
     def _net_position(self):
         strat = self.strategy
+        getter = getattr(strat, 'get_position_size', None)
+        if callable(getter):
+            symbol = getattr(strat, '_default_symbol', None)
+            if symbol is None:
+                symbol = getattr(strat.p, 'symbol', None)
+            try:
+                return getter(symbol)
+            except TypeError:
+                return getter()
         if getattr(strat.p, 'execute_on_contracts', False) and len(strat.datas) > 1:
             return sum(strat.getposition(d).size for d in strat.datas[1:])
         return strat.position.size
@@ -78,7 +99,7 @@ class TradeLogAnalyzer(bt.Analyzer):
     """
     Collects the open and close records of every completed trade.
     Fields:
-      trade_id, open_date, close_date, direction, contract,
+      trade_id, open_date, close_date, direction, symbol, contract,
       open_price, close_price, size,
       gross_pnl, commission, net_pnl, margin_used
     """
@@ -112,6 +133,7 @@ class TradeLogAnalyzer(bt.Analyzer):
                 'close_price': order.executed.price,   # placeholder
                 'size':        order.executed.size,
                 'contract':    self._order_contract(order),
+                'symbol':      parse_product(self._order_contract(order)) or '',
             }
         else:
             # Subsequent (closing) order -> update close price
@@ -126,12 +148,20 @@ class TradeLogAnalyzer(bt.Analyzer):
         direction   = info.get('direction',   'long')
         open_price  = info.get('open_price',  trade.price)
         close_price = info.get('close_price', trade.price)
-        contract    = info.get('contract') or self._trade_contract(trade)
-
         size = abs(info.get('size', trade.size)) or 1
 
-        mult   = self.strategy.p.contract_multiplier
-        margin = self.strategy.p.margin_rate
+        contract    = info.get('contract') or self._trade_contract(trade)
+        symbol      = info.get('symbol') or parse_product(contract) or ''
+        try:
+            costs = product_costs(symbol) if symbol else None
+        except KeyError:
+            costs = None
+        if costs is None:
+            mult = getattr(self.strategy.p, 'contract_multiplier', 20)
+            margin = getattr(self.strategy.p, 'margin_rate', 0.10)
+        else:
+            mult = costs['multiplier']
+            margin = costs['margin_rate']
 
         # Calculate margin from entry price and actual size
         margin_used = round(
@@ -144,6 +174,7 @@ class TradeLogAnalyzer(bt.Analyzer):
             'open_date':   bt.num2date(trade.dtopen).date(),
             'close_date':  bt.num2date(trade.dtclose).date(),
             'direction':   direction,
+            'symbol':      symbol,
             'contract':    contract,
             'open_price':  round(open_price, 4),
             'close_price': round(close_price, 4),
@@ -182,30 +213,23 @@ class BacktestEngine:
     ----------
     strategy_class : type
         Strategy class (subclass of FuturesStrategyBase).
-    data_feed : bt.feeds.PandasData
-        Signal series (OI-weighted). Always added as datas[0].
+    universe : dict
+        Output of ``DataManager.get_universe_bundle``.
     config : dict
         Backtest configuration. Keys:
           initial_cash         initial cash (default 100000)
-          commission_rate      commission rate (default 0.0002)
-          margin_rate          margin ratio (default 0.10)
-          contract_multiplier  contract multiplier (default 20)
           trade_size           lots per trade (default 1)
-          slippage             fraction of fill price (default 0; buy worse / sell worse)
+          slippage             fill slippage in price points (default 0; buy worse / sell worse)
           strategy_params      extra dict passed to the strategy (optional)
           results_dir          output directory (default backtest/results)
           strategy_name        strategy name (used in file naming)
           execute_on_contracts trade calendar contracts instead of weighted
-          contract_by_date     {date: contract_code} roll map
-    contract_feeds : dict
-        Optional {contract_code: PandasData} execution feeds.
+          symbol               default product when strategy_params omits it
+        Margin, commission, and multiplier are read per product from products.py.
     """
 
     DEFAULT_CONFIG = {
         'initial_cash':         100_000.0,
-        'commission_rate':      0.0002,
-        'margin_rate':          0.10,
-        'contract_multiplier':  20,
         'trade_size':           1,
         'slippage':             0.0,
         'strategy_params':      {},
@@ -214,16 +238,48 @@ class BacktestEngine:
         ),
         'strategy_name':        'strategy',
         'execute_on_contracts': False,
-        'contract_by_date':     {},
+        'symbol':               None,
     }
 
-    def __init__(self, strategy_class, data_feed, config: dict = None,
-                 contract_feeds: dict = None):
+    def __init__(self, strategy_class, universe: dict, config: dict = None):
         self.strategy_class = strategy_class
-        self.data_feed = data_feed
-        self.contract_feeds = contract_feeds or {}
+        self.universe = universe
+        self.symbols = list(universe['symbols'])
+        self.products = universe['products']
         self.config = {**self.DEFAULT_CONFIG, **(config or {})}
         os.makedirs(self.config['results_dir'], exist_ok=True)
+        self.default_symbol = self._resolve_default_symbol()
+
+    def _resolve_default_symbol(self) -> str:
+        sp = self.config.get('strategy_params') or {}
+        class_default = self.symbols[0]
+        try:
+            class_default = self.strategy_class.params.symbol
+        except Exception:
+            pass
+        raw = sp.get('symbol', self.config.get('symbol') or class_default)
+        symbol = normalize_symbol(raw)
+        if symbol not in self.products:
+            raise ValueError(
+                f"Strategy symbol {symbol!r} is not in loaded products "
+                f"{self.symbols}. Set STRATEGY_PARAMS['symbol'] to one of them."
+            )
+        return symbol
+
+    def _use_contracts(self) -> bool:
+        if not self.config.get('execute_on_contracts', False):
+            return False
+        has_feeds = any(self.products[s].get('contract_feeds') for s in self.symbols)
+        if not has_feeds:
+            raise ValueError(
+                "execute_on_contracts=True but no contract_feeds were provided"
+            )
+        default_feeds = self.products[self.default_symbol].get('contract_feeds') or {}
+        if not default_feeds:
+            raise ValueError(
+                f"execute_on_contracts=True but {self.default_symbol} has no contract feeds"
+            )
+        return True
 
     # ------------------------------------------------------------------
     # Public methods
@@ -239,12 +295,10 @@ class BacktestEngine:
         print("[BacktestEngine] Starting backtest ...")
         slippage = max(0.0, float(self.config.get('slippage', 0.0) or 0.0))
         if slippage:
-            print(f"[BacktestEngine] Slippage: {slippage:g} of fill price")
+            print(f"[BacktestEngine] Slippage: {slippage:g} price points")
         else:
             print("[BacktestEngine] Slippage: off")
-        use_contracts = bool(self.contract_feeds) and self.config.get(
-            'execute_on_contracts', False
-        )
+        use_contracts = self._use_contracts()
         results = cerebro.run(runonce=False, cheat_on_open=use_contracts)
         strat = results[0]
 
@@ -269,56 +323,104 @@ class BacktestEngine:
     # Internal methods: build Cerebro
     # ------------------------------------------------------------------
 
+    def _commission_info(self, symbol: str) -> FuturesCommissionInfo:
+        costs = product_costs(symbol)
+        per_lot = costs['commission_mode'] == 'per_lot'
+        return FuturesCommissionInfo(
+            commission=(
+                costs['commission_per_lot'] if per_lot else costs['commission_rate']
+            ),
+            mult=costs['multiplier'],
+            margin_rate=costs['margin_rate'],
+            per_lot=per_lot,
+            margin=1.0,
+            commtype=(
+                bt.CommissionInfo.COMM_FIXED if per_lot else bt.CommissionInfo.COMM_PERC
+            ),
+            percabs=not per_lot,
+            stocklike=False,
+        )
+
     def _build_cerebro(self) -> bt.Cerebro:
         cfg = self.config
-        use_contracts = bool(self.contract_feeds) and cfg.get(
-            'execute_on_contracts', False
-        )
-        if cfg.get('execute_on_contracts') and not self.contract_feeds:
-            raise ValueError(
-                "execute_on_contracts=True but no contract_feeds were provided"
-            )
+        use_contracts = self._use_contracts()
+        default_symbol = self.default_symbol
 
         cerebro = bt.Cerebro(runonce=False, cheat_on_open=use_contracts)
 
-        # Weighted series first so self.data remains the signal feed;
-        # remaining feeds are every real contract in the window.
-        cerebro.adddata(self.data_feed, name='weighted')
-        for code, feed in self.contract_feeds.items():
-            cerebro.adddata(feed, name=code)
+        default_bundle = self.products[default_symbol]
+        cerebro.adddata(
+            default_bundle['weighted_feed'],
+            name=weighted_feed_name(default_symbol),
+        )
+        for symbol in self.symbols:
+            bundle = self.products[symbol]
+            if symbol != default_symbol:
+                cerebro.adddata(
+                    bundle['weighted_feed'],
+                    name=weighted_feed_name(symbol),
+                )
+            for code, feed in bundle['contract_feeds'].items():
+                cerebro.adddata(feed, name=code)
 
-        # Merge strategy parameters
+        contract_by_date = {
+            symbol: self.products[symbol]['contract_by_date']
+            for symbol in self.symbols
+        }
+        first_print = {
+            symbol: self.products[symbol]['first_print']
+            for symbol in self.symbols
+        }
+        default_costs = product_costs(default_symbol)
+        default_mult = default_costs['multiplier']
+
         strat_params = {
-            'contract_multiplier':  cfg['contract_multiplier'],
+            'contract_multiplier':  default_mult,
             'trade_size':           cfg['trade_size'],
-            'margin_rate':          cfg['margin_rate'],
+            'margin_rate':          default_costs['margin_rate'],
             'execute_on_contracts': use_contracts,
+            'symbol':               default_symbol,
+            'symbols':              list(self.symbols),
+            'first_print':          first_print,
         }
         strat_params.update(cfg.get('strategy_params', {}))
         strat_params['execute_on_contracts'] = use_contracts
-        strat_params['contract_by_date'] = cfg.get('contract_by_date') or {}
+        strat_params['contract_by_date'] = contract_by_date
+        strat_params['symbol'] = default_symbol
+        strat_params['symbols'] = list(self.symbols)
+        strat_params['first_print'] = first_print
         cerebro.addstrategy(self.strategy_class, **strat_params)
 
-        # Broker
         cerebro.broker.setcash(cfg['initial_cash'])
 
-        # Futures margin is a percentage of notional; the fee is charged on
-        # notional (price × lots × contract multiplier) on every execution.
-        comm_info = FuturesCommissionInfo(
-            commission=cfg['commission_rate'],
-            mult=cfg['contract_multiplier'],
-            margin_rate=cfg['margin_rate'],
-            margin=1.0,  # ensures futures-like accounting in Backtrader
-            commtype=bt.CommissionInfo.COMM_PERC,
-            percabs=True,
-            stocklike=False,
+        default_comm = None
+        print("[BacktestEngine] Product costs (from products.py):")
+        for symbol in self.symbols:
+            costs = product_costs(symbol)
+            comm_text = (
+                f"{costs['commission_per_lot']:g} CNY/lot"
+                if costs['commission_mode'] == 'per_lot'
+                else f"{costs['commission_rate']:g} of notional"
+            )
+            print(
+                f"  {symbol}: mult={costs['multiplier']}  "
+                f"margin={costs['margin_rate']:g}  "
+                f"commission={comm_text}"
+            )
+            comm_info = self._commission_info(symbol)
+            cerebro.broker.addcommissioninfo(
+                comm_info, name=weighted_feed_name(symbol)
+            )
+            for code in self.products[symbol]['contract_feeds']:
+                cerebro.broker.addcommissioninfo(comm_info, name=code)
+            if symbol == default_symbol:
+                default_comm = comm_info
+        cerebro.broker.addcommissioninfo(
+            default_comm or self._commission_info(default_symbol)
         )
-        cerebro.broker.addcommissioninfo(comm_info)
 
-        # Buy fills higher / sell fills lower by this fraction of price.
-        # slip_open must be True: market and roll orders execute at the open.
         slippage = max(0.0, float(cfg.get('slippage', 0.0) or 0.0))
-        cerebro.broker.set_slippage_perc(
+        cerebro.broker.set_slippage_fixed(
             slippage,
             slip_open=True,
             slip_limit=True,
@@ -327,11 +429,8 @@ class BacktestEngine:
         )
 
         if use_contracts:
-            # next_open() roll orders fill at that bar's open; next() market
-            # orders still fill on the following bar's open.
             cerebro.broker.set_coo(True)
 
-        # Analyzers
         cerebro.addanalyzer(DailyEquityAnalyzer,  _name='daily_equity')
         cerebro.addanalyzer(TradeLogAnalyzer,     _name='trade_log')
         cerebro.addanalyzer(btanalyzers.SharpeRatio,
@@ -455,7 +554,7 @@ class BacktestEngine:
         filepath = os.path.join(self.config['results_dir'], filename)
 
         fieldnames = [
-            'trade_id', 'open_date', 'close_date', 'direction', 'contract',
+            'trade_id', 'open_date', 'close_date', 'direction', 'symbol', 'contract',
             'open_price', 'close_price', 'size',
             'gross_pnl', 'commission', 'net_pnl', 'margin_used',
         ]

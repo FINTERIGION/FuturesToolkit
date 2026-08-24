@@ -17,6 +17,7 @@ class DoubleMaStrategy(FuturesStrategyBase):
     """
 
     params = (
+        ('symbol', 'SA'),
         ('fast_period', 5),
         ('slow_period', 20),
     )

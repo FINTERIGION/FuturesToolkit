@@ -2,7 +2,8 @@
 CZCE futures history download and OI-weighted aggregation.
 
 Usage:
-  python backtest/data_update.py              # incremental: refresh current year
+  python backtest/data_update.py              # incremental: all registered products
+  python backtest/data_update.py FG CF        # selected products only
   python backtest/data_update.py --force      # re-download every year
   python backtest/data_update.py --rebuild-only
 """
@@ -13,6 +14,7 @@ import argparse
 import hashlib
 import json
 import os
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -20,13 +22,14 @@ from datetime import datetime
 
 import pandas as pd
 
+BACKTEST_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, BACKTEST_DIR)
+
+from products import get_product, list_products, normalize_symbol, require_products
+
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CACHE_DIR = os.path.join(ROOT_DIR, 'cache')
 DATA_DIR = os.path.join(ROOT_DIR, 'data')
-
-_SYMBOL_META = {
-    'SA': {'exchange': 'CZCE', 'start_year': 2019},
-}
 
 _HEADER_MAP = {
     '交易日期': 'date',
@@ -240,19 +243,16 @@ def _http_download(url: str, dest: str) -> None:
 
 class DataUpdate:
     def __init__(self, category: str, data_dir: str = None, cache_dir: str = None):
-        if category not in _SYMBOL_META:
-            supported = ', '.join(sorted(_SYMBOL_META))
-            raise KeyError(f'Unknown symbol {category!r}; supported: {supported}')
-        meta = _SYMBOL_META[category]
-        self.category = category
+        meta = get_product(category)
+        self.category = normalize_symbol(category)
         self.exchange = meta['exchange']
         self.start_year = meta['start_year']
         self.year = datetime.now().year
         self.data_dir = data_dir or DATA_DIR
         self.cache_dir = cache_dir or CACHE_DIR
-        self.raw_path = os.path.join(self.data_dir, f'{category}.csv')
-        self.weighted_path = os.path.join(self.data_dir, f'{category}_weighted.csv')
-        self._meta_path = os.path.join(self.cache_dir, f'{category}.meta.json')
+        self.raw_path = os.path.join(self.data_dir, f'{self.category}.csv')
+        self.weighted_path = os.path.join(self.data_dir, f'{self.category}_weighted.csv')
+        self._meta_path = os.path.join(self.cache_dir, f'{self.category}.meta.json')
 
     def years(self) -> range:
         return range(self.start_year, self.year + 1)
@@ -375,7 +375,13 @@ def main(argv=None) -> None:
     parser = argparse.ArgumentParser(
         description='Download CZCE history and build OI-weighted daily bars.',
     )
-    parser.add_argument('symbol', nargs='?', default='SA', help='Futures symbol (default: SA)')
+    parser.add_argument(
+        'symbols',
+        nargs='*',
+        default=None,
+        help='Futures symbols (default: all registered products: %s)'
+        % ', '.join(list_products()),
+    )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--force', action='store_true', help='Re-download every year')
     mode.add_argument(
@@ -384,7 +390,17 @@ def main(argv=None) -> None:
         help='Rebuild CSVs from local cache without downloading',
     )
     args = parser.parse_args(argv)
-    DataUpdate(args.symbol).update(force=args.force, rebuild_only=args.rebuild_only)
+    symbols = require_products(args.symbols or list_products())
+    failed = []
+    for symbol in symbols:
+        try:
+            DataUpdate(symbol).update(force=args.force, rebuild_only=args.rebuild_only)
+        except Exception as exc:
+            failed.append((symbol, exc))
+            print(f'{symbol} failed: {exc}')
+    if failed:
+        names = ', '.join(sym for sym, _ in failed)
+        raise SystemExit(f'Data update failed for: {names}')
 
 
 if __name__ == '__main__':

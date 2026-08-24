@@ -16,20 +16,38 @@ class MyStrategy(FuturesStrategyBase):
       4. Set STRATEGY = MyStrategy in main.py
 
     Available methods:
-      self.buy_signal()         open long
-      self.sell_signal()        open short
-      self.close_signal()       close position
-      self.get_position_size()  current position (positive=long, negative=short)
+      self.buy_signal()                 open long (default product)
+      self.buy_signal(symbol='FG')      open long on a named product
+      self.sell_signal(symbol='CF')     open short
+      self.close_signal(symbol='SA')    close one product
+      self.get_position_size()          default product net lots
+      self.get_position_size('FG')      one product's net lots
+      self.has_pending(symbol='FG')     pending order on that product
 
     Available data:
-      self.data / self.weighted     OI-weighted series (datas[0])
-      self.contracts['SA2505']      any real contract in the backtest window
-      self.get_contract('SA2505')   same, or None if that code was not loaded
-      self.data.close[0]            today's weighted close
+      self.data / self.weighted         default product's OI-weighted series
+      self.contracts['SA2505']          that product's real contracts
+      self.products['FG'].weighted      any loaded product's weighted series
+      self.products['FG'].contracts     that product's real contracts
+      self.get_weighted('CF')           helper for the line above
+      self.get_contract('FG2505')       any real contract, or None
+      self.symbols                      products loaded for this run
+      self.data.close[0]                today's default weighted close
       self.data.open / high / low / volume / openinterest / settle
+
+    Multi-product sketch (one independent signal per product)::
+
+        for sym in self.symbols:
+            if self.has_pending(sym):
+                continue
+            pos = self.get_position_size(sym)
+            close = self.get_weighted(sym).close[0]
+            if pos == 0 and close > self.sma[sym][0]:
+                self.buy_signal(symbol=sym)
     """
 
     params = (
+        ('symbol', 'SA'),
         # Add strategy parameters here, e.g.:
         # ('fast', 5),
         # ('slow', 20),
