@@ -8,19 +8,16 @@ Responsible for:
 """
 
 import os
+import collections
 import math
 import datetime
 import csv
-import sys
 import backtrader as bt
 import backtrader.analyzers as btanalyzers
 import pandas as pd
 import numpy as np
 
-BACKTEST_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, BACKTEST_DIR)
-
-from products import normalize_symbol, parse_product, product_costs, weighted_feed_name
+from .products import normalize_symbol, parse_product, product_costs, weighted_feed_name
 
 
 # ==============================================================================
@@ -47,6 +44,38 @@ class FuturesCommissionInfo(bt.CommissionInfo):
         """Return margin per lot: price × multiplier × margin rate."""
         return price * self.p.mult * self.p.margin_rate
 
+    def getvalue(self, position, price):
+        """Equity contribution of a position: margin locked at the entry price.
+
+        Backtrader takes ``getoperationcost(size, entry)`` out of cash when a
+        position opens and adds ``getvalue(position, close)`` back when pricing
+        the account. With a price-dependent ``get_margin`` those two do not
+        cancel, and the leftover term rides on the equity curve:
+
+            equity = true_equity + |size| * mult * margin_rate * (close - entry)
+
+        i.e. longs were reported at ``true_pnl * (1 + margin_rate)`` and shorts
+        at ``true_pnl * (1 - margin_rate)`` - an 11-13% error on these products,
+        in opposite directions. Valuing at ``position.price`` makes the pair
+        cancel exactly, so only the mark-to-market P&L that ``cashadjust``
+        already booked into cash moves the equity.
+
+        Ignoring ``price`` also keeps flat positions from poisoning the account
+        value. ``Strategy.getposition`` seeds ``broker.positions`` with a
+        zero-size entry for every feed it is asked about, and a contract that
+        has not printed yet carries ``close = nan``: ``abs(0) * get_margin(nan)``
+        is nan, which is enough to turn the whole equity curve into nan.
+
+        Requires ``broker.set_shortcash(False)`` - see ``_build_cerebro``.
+        """
+        return abs(position.size) * self.get_margin(position.price)
+
+    def profitandloss(self, size, price, newprice):
+        """Same nan guard for the unrealized leg of ``BackBroker._get_value``."""
+        if not size:
+            return 0.0
+        return super().profitandloss(size, price, newprice)
+
     def _getcommission(self, size, price, pseudoexec):
         lots = abs(size)
         if self.p.per_lot:
@@ -56,17 +85,25 @@ class FuturesCommissionInfo(bt.CommissionInfo):
 
 class DailyEquityAnalyzer(bt.Analyzer):
     """
-    Records, for every bar: date, total account equity, current position, and daily return.
+    Records, for every bar: date, total account equity, per-product net
+    position, and daily return.
+
+    ``position`` is a ``{symbol: net_lots}`` dict covering every product
+    loaded into the run, not just the strategy's default symbol - a
+    multi-product strategy can be long one product and short another on the
+    same day, and collapsing that to a single scalar hid every product but
+    the default one from the position/summary charts.
     """
 
     def start(self):
-        self.equity_records = []      # [(date, equity, position)]
+        self.equity_records = []      # [{date, equity, position, daily_return}]
         self._prev_equity = self.strategy.broker.getvalue()
+        self._symbols = list(getattr(self.strategy, 'symbols', None) or [])
 
     def next(self):
         dt = self.strategy.datas[0].datetime.date(0)
         equity = self.strategy.broker.getvalue()
-        pos = self._net_position()
+        pos = self._positions()
         daily_return = (equity - self._prev_equity) / self._prev_equity if self._prev_equity else 0.0
         self.equity_records.append({
             'date': dt,
@@ -76,126 +113,298 @@ class DailyEquityAnalyzer(bt.Analyzer):
         })
         self._prev_equity = equity
 
-    def _net_position(self):
+    def _positions(self):
         strat = self.strategy
         getter = getattr(strat, 'get_position_size', None)
-        if callable(getter):
-            symbol = getattr(strat, '_default_symbol', None)
-            if symbol is None:
-                symbol = getattr(strat.p, 'symbol', None)
-            try:
-                return getter(symbol)
-            except TypeError:
-                return getter()
+        if callable(getter) and self._symbols:
+            out = {}
+            for symbol in self._symbols:
+                try:
+                    out[symbol] = getter(symbol)
+                except TypeError:
+                    out[symbol] = getter()
+            return out
+        # Fallback for a bare backtrader Strategy without the multi-product
+        # helpers from FuturesStrategyBase.
         if getattr(strat.p, 'execute_on_contracts', False) and len(strat.datas) > 1:
-            return sum(strat.getposition(d).size for d in strat.datas[1:])
-        return strat.position.size
+            net = sum(strat.getposition(d).size for d in strat.datas[1:])
+        else:
+            net = strat.position.size
+        symbol = getattr(strat.p, 'symbol', None) or 'default'
+        return {symbol: net}
 
     def get_analysis(self):
         return self.equity_records
 
 
+TRADE_LOG_FIELDS = [
+    'trade_id', 'open_date', 'close_date', 'direction', 'symbol',
+    'contract', 'contracts', 'n_rolls',
+    'open_price', 'close_price', 'size',
+    'gross_pnl', 'commission', 'net_pnl', 'margin_used', 'open_at_end',
+]
+
+
 class TradeLogAnalyzer(bt.Analyzer):
     """
-    Collects the open and close records of every completed trade.
-    Fields:
-      trade_id, open_date, close_date, direction, symbol, contract,
-      open_price, close_price, size,
-      gross_pnl, commission, net_pnl, margin_used
+    One row per *logical* trade: the signal entry that takes a product off flat
+    through the signal exit that flattens it again, with every calendar roll in
+    between folded into that same row.
+
+    Two reasons this is a fill-driven ledger rather than a wrapper around
+    backtrader's ``Trade``:
+
+    * Backtrader tracks a Trade per data feed, so each Dec/Apr/Aug roll closes
+      one trade and opens another. Counting roll segments as trades inflates
+      ``n_trades`` and skews win rate, payoff ratio and profit factor. Roll
+      fills carry ``info['is_roll']`` (set by ``FuturesStrategyBase._mark_roll``)
+      and move exposure between contracts without opening or closing a row.
+    * ``Strategy._notify`` delivers *every* order of a bar before *any* trade of
+      that bar, so keying open/close state off ``(feed, tradeid)`` - with
+      ``tradeid`` always 0 - let a same-bar reversal or a scale-in overwrite the
+      previous entry's direction, price and size.
+
+    Fields: see ``TRADE_LOG_FIELDS``.
     """
 
     def __init__(self):
         self.trades = []
-        # trade.ref -> {'direction': str, 'open_price': float, 'close_price': float}
-        self._trade_info = {}
+        self._open = {}       # symbol -> logical trade under construction
+        self._closing = []    # flattened rows still collecting their trade pnl
+        self._net = {}        # symbol -> net lots across all of its contracts
+        self._data_net = {}   # feed -> net lots on that feed
+        self._owner = {}      # feed -> deque of rows holding a Trade on it
+        self._costs = {}      # symbol -> (multiplier, margin_rate)
+        self._next_id = 1
 
-    def _trade_key(self, order_or_trade):
-        data = getattr(order_or_trade, 'data', None)
-        name = getattr(data, '_name', '') if data is not None else ''
-        tradeid = getattr(order_or_trade, 'tradeid', 0)
-        return (name, tradeid)
+    # ------------------------------------------------------------------
+    # Notifications
+    # ------------------------------------------------------------------
 
     def notify_order(self, order):
-        """
-        Track direction and execution prices from completed orders.
-        First order on a trade = open; subsequent closing order = close.
-        Keyed by (data name, tradeid) so calendar rolls on another
-        contract cannot overwrite the close price.
-        """
         if order.status != order.Completed:
             return
-        tid = self._trade_key(order)
-        if tid not in self._trade_info:
-            # First order for this trade -> record open direction, price, and size
-            self._trade_info[tid] = {
-                'direction':   'long' if order.isbuy() else 'short',
-                'open_price':  order.executed.price,
-                'close_price': order.executed.price,   # placeholder
-                'size':        order.executed.size,
-                'contract':    self._order_contract(order),
-                'symbol':      parse_product(self._order_contract(order)) or '',
-            }
+        size = int(order.executed.size)
+        if not size:
+            return
+
+        price = float(order.executed.price)
+        data = order.data
+        symbol = self._symbol_of(order)
+        is_roll = bool(self._info(order, 'is_roll', False))
+
+        prev = self._net.get(symbol, 0)
+        new = prev + size
+        self._net[symbol] = new
+
+        # A row that already went flat never takes another fill: retire it (it
+        # keeps collecting pnl from _closing) and let this fill start a new one.
+        row = self._open.get(symbol)
+        if row is not None and row['flat']:
+            del self._open[symbol]
+            self._closing.append(row)
+            row = None
+        if row is None and new != 0:
+            # A roll normally cannot start a row, but _maybe_roll_symbol folds a
+            # re-issued signal order into its roll order when a product holds
+            # both, so accept one here rather than orphan the pnl.
+            row = self._open[symbol] = self._begin(symbol, order, new)
+
+        # Feed-level ownership: whoever takes a feed off zero owns the Trade
+        # that will eventually close on it. A deque keeps same-bar reversals and
+        # "roll plus exit on one bar" from crossing wires.
+        dprev = self._data_net.get(data, 0)
+        self._data_net[data] = dprev + size
+        if dprev == 0 and row is not None:
+            self._owner.setdefault(data, collections.deque()).append(row)
+
+        if row is None:
+            return
+
+        name = getattr(data, '_name', '') or ''
+        if name and name not in row['contracts']:
+            row['contracts'].append(name)
+
+        # Commission is taken per fill rather than from Trade.commission so that
+        # a position still open at the end of the sample carries the cost of its
+        # own entry - Trade.commission is only readable once the trade closes.
+        row['commission'] += order.executed.comm
+
+        if is_roll:
+            row['roll_days'].add(self._today())
+            return
+
+        if abs(new) > abs(prev):
+            row['entry_qty'] += abs(size)
+            row['entry_notional'] += abs(size) * price
         else:
-            # Subsequent (closing) order -> update close price
-            self._trade_info[tid]['close_price'] = order.executed.price
+            row['exit_qty'] += abs(size)
+            row['exit_notional'] += abs(size) * price
+
+        mult, margin_rate = self._product_costs(symbol)
+        row['size'] = max(row['size'], abs(new))
+        row['margin_used'] = max(
+            row['margin_used'], abs(new) * price * mult * margin_rate
+        )
+
+        if new == 0:
+            row['flat'] = True
+            row['close_date'] = self._today()
 
     def notify_trade(self, trade):
         if not trade.isclosed:
             return
+        queue = self._owner.get(trade.data)
+        row = queue.popleft() if queue else None
+        if row is None:
+            row = self._open.get(self._symbol_of(trade))
+        if row is None:
+            return
+        row['gross_pnl'] += trade.pnl
 
-        tid = self._trade_key(trade)
-        info = self._trade_info.pop(tid, {})
-        direction   = info.get('direction',   'long')
-        open_price  = info.get('open_price',  trade.price)
-        close_price = info.get('close_price', trade.price)
-        size = abs(info.get('size', trade.size)) or 1
+    # ------------------------------------------------------------------
+    # Flushing
+    # ------------------------------------------------------------------
 
-        contract    = info.get('contract') or self._trade_contract(trade)
-        symbol      = info.get('symbol') or parse_product(contract) or ''
+    def _flush(self):
+        """Emit rows whose pnl has fully arrived.
+
+        Safe here because ``LineIterator._next`` runs ``_notify()`` (all order
+        then all trade callbacks for the bar) before ``next()``, and analyzers
+        are stepped after that.
+        """
+        while self._closing:
+            self.trades.append(self._finalize(self._closing.pop(0)))
+        for symbol, row in list(self._open.items()):
+            if row['flat']:
+                del self._open[symbol]
+                self.trades.append(self._finalize(row))
+
+    def prenext(self):
+        self._flush()
+
+    def next(self):
+        self._flush()
+
+    def stop(self):
+        self._flush()
+        # Anything still in the market at the end of the sample is booked at the
+        # last close, so sum(net_pnl) still reconciles against final equity.
+        for symbol, row in list(self._open.items()):
+            del self._open[symbol]
+            self._settle_open(row)
+            self.trades.append(self._finalize(row))
+
+    def _settle_open(self, row):
+        strat = self.strategy
+        row['open_at_end'] = 1
+        row['close_date'] = self._today()
+        for name in row['contracts']:
+            try:
+                data = strat.getdatabyname(name)
+            except Exception:
+                continue
+            pos = strat.getposition(data)
+            if not pos.size:
+                continue
+            comminfo = strat.broker.getcommissioninfo(data)
+            mark = float(data.close[0])
+            row['gross_pnl'] += comminfo.profitandloss(pos.size, pos.price, mark)
+            row['exit_qty'] += abs(pos.size)
+            row['exit_notional'] += abs(pos.size) * mark
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _begin(self, symbol, order, net) -> dict:
+        return {
+            'id': self._take_id(),
+            'symbol': symbol,
+            'direction': 'long' if net > 0 else 'short',
+            'open_date': self._today(),
+            'close_date': None,
+            'contract': getattr(order.data, '_name', '') or '',
+            'contracts': [],
+            'roll_days': set(),
+            'entry_qty': 0, 'entry_notional': 0.0,
+            'exit_qty': 0, 'exit_notional': 0.0,
+            'size': 0, 'margin_used': 0.0,
+            'gross_pnl': 0.0, 'commission': 0.0,
+            'flat': False, 'open_at_end': 0,
+        }
+
+    def _take_id(self) -> int:
+        tid = self._next_id
+        self._next_id += 1
+        return tid
+
+    def _finalize(self, row) -> dict:
+        entry = (
+            row['entry_notional'] / row['entry_qty'] if row['entry_qty'] else 0.0
+        )
+        exit_price = (
+            row['exit_notional'] / row['exit_qty'] if row['exit_qty'] else entry
+        )
+        return {
+            'trade_id':    row['id'],
+            'open_date':   row['open_date'],
+            'close_date':  row['close_date'],
+            'direction':   row['direction'],
+            'symbol':      row['symbol'],
+            'contract':    row['contract'],
+            'contracts':   '|'.join(row['contracts']),
+            'n_rolls':     len(row['roll_days']),
+            'open_price':  round(entry, 4),
+            'close_price': round(exit_price, 4),
+            'size':        row['size'],
+            'gross_pnl':   round(row['gross_pnl'], 4),
+            'commission':  round(row['commission'], 4),
+            'net_pnl':     round(row['gross_pnl'] - row['commission'], 4),
+            'margin_used': round(row['margin_used'], 4),
+            'open_at_end': row['open_at_end'],
+        }
+
+    def _product_costs(self, symbol):
+        if symbol in self._costs:
+            return self._costs[symbol]
         try:
             costs = product_costs(symbol) if symbol else None
         except KeyError:
             costs = None
         if costs is None:
-            mult = getattr(self.strategy.p, 'contract_multiplier', 20)
-            margin = getattr(self.strategy.p, 'margin_rate', 0.10)
+            pair = (
+                getattr(self.strategy.p, 'contract_multiplier', 20),
+                getattr(self.strategy.p, 'margin_rate', 0.10),
+            )
         else:
-            mult = costs['multiplier']
-            margin = costs['margin_rate']
+            pair = (costs['multiplier'], costs['margin_rate'])
+        self._costs[symbol] = pair
+        return pair
 
-        # Calculate margin from entry price and actual size
-        margin_used = round(
-            open_price * size * mult * margin,
-            4
-        )
-
-        self.trades.append({
-            'trade_id':    trade.ref,
-            'open_date':   bt.num2date(trade.dtopen).date(),
-            'close_date':  bt.num2date(trade.dtclose).date(),
-            'direction':   direction,
-            'symbol':      symbol,
-            'contract':    contract,
-            'open_price':  round(open_price, 4),
-            'close_price': round(close_price, 4),
-            'size':        size,
-            'gross_pnl':   round(trade.pnl, 4),
-            'commission':  round(trade.commission, 4),
-            'net_pnl':     round(trade.pnlcomm, 4),
-            'margin_used': margin_used,
-        })
+    def _today(self):
+        try:
+            return self.strategy.datas[0].datetime.date(0)
+        except Exception:
+            return None
 
     @staticmethod
-    def _order_contract(order) -> str:
-        data = getattr(order, 'data', None)
-        name = getattr(data, '_name', '') if data is not None else ''
-        return name or ''
+    def _info(order, key, default=None):
+        info = getattr(order, 'info', None)
+        if info is None:
+            return default
+        try:
+            return info.get(key, default)
+        except Exception:
+            return getattr(info, key, default)
 
-    @staticmethod
-    def _trade_contract(trade) -> str:
-        data = getattr(trade, 'data', None)
+    def _symbol_of(self, order_or_trade) -> str:
+        tagged = self._info(order_or_trade, 'symbol')
+        if tagged:
+            return normalize_symbol(tagged)
+        data = getattr(order_or_trade, 'data', None)
         name = getattr(data, '_name', '') if data is not None else ''
-        return name or ''
+        return parse_product(name) or ''
 
     def get_analysis(self):
         return self.trades
@@ -392,6 +601,12 @@ class BacktestEngine:
         cerebro.addstrategy(self.strategy_class, **strat_params)
 
         cerebro.broker.setcash(cfg['initial_cash'])
+        # With shortcash on (backtrader's default) the account is priced through
+        # ``getvaluesize(size, close)``, which has no access to the entry price.
+        # Turning it off routes pricing through FuturesCommissionInfo.getvalue.
+        # For futures both branches compute the same opened/closed values, so
+        # this changes how positions are valued, not how cash flows.
+        cerebro.broker.set_shortcash(False)
 
         default_comm = None
         print("[BacktestEngine] Product costs (from products.py):")
@@ -470,10 +685,16 @@ class BacktestEngine:
             if excess.std() > 1e-10 else 0.0
         )
 
-        # Max drawdown
+        # Max drawdown. Backtrader does not force-liquidate on margin calls, so
+        # a leveraged position can carry equity to zero or below; once the
+        # running peak itself is non-positive, drawdown-as-a-fraction-of-peak
+        # is undefined, so treat that region as a full (100%) drawdown instead
+        # of dividing by a zero/negative peak.
         equities = np.array([r['equity'] for r in equity_records], dtype=float)
         running_max = np.maximum.accumulate(equities)
-        drawdowns = (running_max - equities) / running_max
+        with np.errstate(divide='ignore', invalid='ignore'):
+            ratio = (running_max - equities) / running_max
+        drawdowns = np.where(running_max > 0, ratio, 1.0)
         max_drawdown = float(drawdowns.max()) if len(drawdowns) > 0 else 0.0
 
         # Maximum drawdown recovery period, measured from the peak before the
@@ -484,9 +705,8 @@ class BacktestEngine:
         else:
             trough_idx = int(np.argmax(drawdowns))
             peak_equity = running_max[trough_idx]
-            peak_idx = int(np.flatnonzero(
-                equities[:trough_idx + 1] == peak_equity
-            )[-1])
+            peak_hits = np.flatnonzero(equities[:trough_idx + 1] == peak_equity)
+            peak_idx = int(peak_hits[-1]) if len(peak_hits) else trough_idx
             recovery_indices = np.flatnonzero(
                 equities[trough_idx + 1:] >= peak_equity
             ) + trough_idx + 1
@@ -525,6 +745,20 @@ class BacktestEngine:
             avg_win = 0.0
             avg_loss = 0.0
 
+        # Books check: every yuan the equity curve moved must be accounted for by
+        # a logged trade. This is the standing sentinel for the three bugs fixed
+        # in this module - it fails if the equity curve picks up a term the trade
+        # log does not know about, or if trades are being split or double-counted.
+        booked = sum(t['net_pnl'] for t in trade_logs)
+        drift = booked - (final_equity - initial_cash)
+        if abs(drift) > max(1e-6 * abs(initial_cash), 0.01):
+            print(
+                f"  [WARN] Trade log does not reconcile with the equity curve: "
+                f"sum(net_pnl)={booked:,.2f} vs "
+                f"equity change={final_equity - initial_cash:,.2f} "
+                f"(drift {drift:,.2f})"
+            )
+
         return {
             'initial_cash':       initial_cash,
             'final_equity':       round(final_equity, 2),
@@ -553,14 +787,8 @@ class BacktestEngine:
         filename = f"{name}_trades_{ts}.csv"
         filepath = os.path.join(self.config['results_dir'], filename)
 
-        fieldnames = [
-            'trade_id', 'open_date', 'close_date', 'direction', 'symbol', 'contract',
-            'open_price', 'close_price', 'size',
-            'gross_pnl', 'commission', 'net_pnl', 'margin_used',
-        ]
-
         with open(filepath, 'w', newline='', encoding='utf-8-sig') as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer = csv.DictWriter(f, fieldnames=TRADE_LOG_FIELDS)
             writer.writeheader()
             writer.writerows(trade_logs)
 

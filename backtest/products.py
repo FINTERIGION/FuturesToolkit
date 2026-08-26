@@ -23,7 +23,7 @@ PRODUCTS: Dict[str, dict] = {
         'start_year': 2019,
         'multiplier': 20,
         'margin_rate': 0.12,
-        'commission_rate': 0.0008,
+        'commission_rate': 0.0001,
     },
     'FG': {
         'exchange': 'CZCE',
@@ -32,7 +32,7 @@ PRODUCTS: Dict[str, dict] = {
         'start_year': 2015,
         'multiplier': 20,
         'margin_rate': 0.13,
-        'commission_per_lot': 24.0,
+        'commission_per_lot': 2.0,
     },
     'CF': {
         'exchange': 'CZCE',
@@ -41,7 +41,7 @@ PRODUCTS: Dict[str, dict] = {
         'start_year': 2015,
         'multiplier': 5,
         'margin_rate': 0.11,
-        'commission_per_lot': 17.2,
+        'commission_per_lot': 4.3,
     },
 }
 

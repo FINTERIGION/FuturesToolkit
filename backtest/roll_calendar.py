@@ -140,8 +140,8 @@ def build_date_contract_map(
     Expiry is parsed per row so 3-digit codes that wrap every decade
     (FG501 in 2015 vs 2025) resolve independently.
 
-    If the target contract has no row on that date, the previous mapped
-    contract is kept and a warning is printed (once per target expiry).
+    If the target contract has no row on that date, the date is left
+    unmapped (not tradable). A warning is printed once per target expiry.
     Dates before ``listed_from`` (product listing) are skipped.
     """
     if contracts_df.empty:
@@ -167,7 +167,6 @@ def build_date_contract_map(
             bucket.append(name)
 
     mapping: Dict[Hashable, str] = {}
-    prev_code: Optional[str] = None
     warned_expiries = set()
 
     for dt in index:
@@ -181,34 +180,17 @@ def build_date_contract_map(
             if dt in dates_by_key.get((expiry, cand), ()):
                 code = cand
                 break
-        if code is None and candidates:
-            # Listed, but no print that session — still tradable after ffill
-            # if it has any history on or before this date.
-            for cand in candidates:
-                earlier = {d for d in dates_by_key.get((expiry, cand), ()) if d <= dt}
-                if earlier:
-                    code = cand
-                    break
 
         if code is None:
-            if prev_code is not None:
-                if warn and expiry not in warned_expiries:
-                    print(
-                        f"[RollCalendar] {dt.date()}: no contract for "
-                        f"{expiry[0]}-{expiry[1]:02d}, keeping {prev_code}"
-                    )
-                    warned_expiries.add(expiry)
-                code = prev_code
-            elif warn and expiry not in warned_expiries:
+            if warn and expiry not in warned_expiries:
                 print(
-                    f"[RollCalendar] {dt.date()}: no contract for "
-                    f"{expiry[0]}-{expiry[1]:02d} and no previous contract"
+                    f"[RollCalendar] {dt.date()}: no print for "
+                    f"{expiry[0]}-{expiry[1]:02d}, skipping session"
                 )
                 warned_expiries.add(expiry)
+            continue
 
-        if code is not None:
-            mapping[dt] = code
-            prev_code = code
+        mapping[dt] = code
 
     return mapping
 

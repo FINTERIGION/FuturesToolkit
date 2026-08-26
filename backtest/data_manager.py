@@ -4,17 +4,15 @@ Responsible for loading, processing, and updating futures data.
 """
 
 import os
-import sys
 import pandas as pd
 import backtrader as bt
 
 BACKTEST_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(BACKTEST_DIR)
-sys.path.insert(0, BACKTEST_DIR)
 
-from data_update import DataUpdate
-from products import require_products
-from roll_calendar import (
+from .data_update import DataUpdate
+from .products import require_products
+from .roll_calendar import (
     annotate_expiries,
     build_date_contract_map,
     colliding_codes,
@@ -31,14 +29,15 @@ class FuturesDailyData(bt.feeds.PandasData):
     """
     Daily futures feed based on PandasData.
 
-    Columns: date, open, high, low, close, settle, oi, volume
+    Columns: date, open, high, low, close, settle, oi, volume, session
 
-    Extra custom line:
-      data.settle  - settlement price
+    Extra custom lines:
+      data.settle   - settlement price
+      data.session  - 1 if this date had a real exchange print, else 0
     Built-in line mapping:
       openinterest -> oi column
     """
-    lines = ('settle',)
+    lines = ('settle', 'session')
 
     params = (
         ('datetime',     None),
@@ -49,6 +48,7 @@ class FuturesDailyData(bt.feeds.PandasData):
         ('volume',       'volume'),
         ('openinterest', 'oi'),
         ('settle',       'settle'),
+        ('session',      'session'),
     )
 
 
@@ -110,19 +110,35 @@ class DataManager:
                 raise
 
     def _feed_from_df(self, df: pd.DataFrame) -> FuturesDailyData:
-        return FuturesDailyData(dataname=df)
+        frame = df
+        if 'session' not in frame.columns:
+            frame = frame.copy()
+            frame['session'] = 1.0
+        return FuturesDailyData(dataname=frame)
 
     @staticmethod
     def _align_contract_ohlc(cdf: pd.DataFrame, index: pd.DatetimeIndex) -> pd.DataFrame:
-        """Reindex one contract onto the shared calendar; ffill/bfill prices."""
+        """Reindex one series onto the shared calendar without looking ahead.
+
+        Real prints keep their OHLC. Days with no print are *not* tradable
+        (``session=0``). After the first print, close/settle/oi are ffilled so
+        existing positions can mark to the last session; open/high/low are
+        flattened to that close so a dark bar cannot print a fake open.
+        ``bfill`` is never used.
+        """
         frame = cdf.copy()
         for col in _ALIGN_COLS:
             if col not in frame.columns:
-                frame[col] = 0.0
+                frame[col] = float('nan')
         out = frame[_ALIGN_COLS].reindex(index)
-        out[_PRICE_COLS] = out[_PRICE_COLS].ffill().bfill()
-        out['oi'] = out['oi'].ffill().bfill().fillna(0)
-        out['volume'] = out['volume'].fillna(0)
+        session = out['close'].notna()
+        out[_PRICE_COLS] = out[_PRICE_COLS].ffill()
+        out['oi'] = out['oi'].ffill().fillna(0)
+        out['volume'] = out['volume'].where(session, 0).fillna(0)
+        out['session'] = session.astype(float)
+        dark = out['close'].notna() & ~session
+        for col in ('open', 'high', 'low', 'settle'):
+            out.loc[dark, col] = out.loc[dark, 'close']
         return out
 
     def _read_weighted(self, symbol: str) -> pd.DataFrame:
@@ -130,7 +146,7 @@ class DataManager:
         if not os.path.exists(path):
             raise FileNotFoundError(
                 f"Weighted data file not found: {path}\n"
-                "Run python backtest/data_update.py first, or pass update=True "
+                "Run python -m backtest.data_update first, or pass update=True "
                 "when constructing DataManager."
             )
 
@@ -191,7 +207,7 @@ class DataManager:
         if not os.path.exists(path):
             raise FileNotFoundError(
                 f"Contract data file not found: {path}\n"
-                "Run python backtest/data_update.py first, or pass update=True "
+                "Run python -m backtest.data_update first, or pass update=True "
                 "when constructing DataManager."
             )
 
@@ -286,7 +302,7 @@ class DataManager:
             frame.index = pd.to_datetime(frame.index).normalize()
             frame = frame[~frame.index.duplicated(keep='last')]
             aligned_df = self._align_contract_ohlc(frame, index)
-            if aligned_df[_PRICE_COLS].isna().all().all():
+            if aligned_df['close'].notna().sum() == 0:
                 print(f"[DataManager] Skipping {name}: no usable OHLC after align")
                 continue
             aligned[name] = aligned_df
@@ -357,7 +373,12 @@ class DataManager:
                 exec_close.append(float('nan'))
                 exec_code.append('')
                 continue
-            exec_close.append(float(aligned[code].loc[dt, 'close']))
+            row = aligned[code].loc[dt]
+            if float(row.get('session', 0) or 0) <= 0:
+                exec_close.append(float('nan'))
+                exec_code.append('')
+                continue
+            exec_close.append(float(row['close']))
             exec_code.append(code)
         exec_price_df = pd.DataFrame(
             {'close': exec_close, 'contract': exec_code},
@@ -390,6 +411,7 @@ class DataManager:
 
         All products are aligned onto the union of their weighted calendars
         inside the backtest window so Backtrader can step them together.
+        Missing days are *not* backfilled; ``session=0`` bars are not tradable.
 
         Returns
         -------

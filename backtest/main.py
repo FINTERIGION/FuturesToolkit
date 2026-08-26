@@ -4,7 +4,7 @@ Backtest Main Module
 Usage:
   1. Modify the parameters in the "Backtest Configuration" section below
   2. Change the import + STRATEGY to the strategy class you want to run
-  3. Run: python backtest/main.py
+  3. Run (from the repo root): python -m backtest.main
 
 Directory structure:
   backtest/
@@ -23,21 +23,18 @@ import csv
 import datetime
 import os
 import statistics
-import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from data_manager    import DataManager
-from backtest_engine import BacktestEngine
-from plotting        import BacktestPlotter
-from products        import require_products
+from .data_manager    import DataManager
+from .backtest_engine import BacktestEngine
+from .plotting        import BacktestPlotter
+from .products        import require_products
 
 # Import strategy (change here to pick a different strategy)
 # Public examples:
-#   from strategies.double_ma import DoubleMaStrategy
-#   from strategies.rsi_mean_reversion import RsiMeanReversionStrategy
-#   from strategies.my_strategy import MyStrategy
-from strategies.double_ma import DoubleMaStrategy
+#   from .strategies.double_ma import DoubleMaStrategy
+#   from .strategies.rsi_mean_reversion import RsiMeanReversionStrategy
+#   from .strategies.my_strategy import MyStrategy
+from .strategies.double_ma import DoubleMaStrategy
 
 
 # ==============================================================================
@@ -239,8 +236,8 @@ def main():
     engine = BacktestEngine(STRATEGY, universe, config)
     default_symbol = engine.default_symbol
     print(f"  Default trade symbol: {default_symbol}")
-    price_df = universe['products'][default_symbol]['weighted_df']
-    exec_price_df = universe['products'][default_symbol]['exec_price_df']
+    price_dfs = {sym: universe['products'][sym]['weighted_df'] for sym in symbols}
+    exec_price_dfs = {sym: universe['products'][sym]['exec_price_df'] for sym in symbols}
 
     # 3. Run backtest
     print("[3/4] Running backtest ...\n")
@@ -254,18 +251,15 @@ def main():
 
     # 4. Plot charts
     print("\n[4/4] Plotting charts ...")
-    signal_log = [
-        sig for sig in result['strat'].signal_log
-        if sig.get('symbol', default_symbol) == default_symbol
-    ]
     plotter = BacktestPlotter(
         equity_records = result['equity_records'],
         trade_logs     = result['trade_logs'],
-        price_df       = price_df,
-        signal_log     = signal_log,
+        price_dfs      = price_dfs,
+        signal_log     = result['strat'].signal_log,
         metrics        = result['metrics'],
         config         = config,
-        exec_price_df  = exec_price_df,
+        exec_price_dfs = exec_price_dfs,
+        symbols        = symbols,
     )
     chart_paths = plotter.plot_all()
 

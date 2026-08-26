@@ -40,10 +40,10 @@ pip install -r requirements.txt
 Data is pulled from CZCE and written to `data/{SA,FG,CF}.csv` and `data/{SA,FG,CF}_weighted.csv`. Historical years are cached under `cache/` and reused; only the current year is re-downloaded by default.
 
 ```bash
-python backtest/data_update.py              # incremental refresh (all products)
-python backtest/data_update.py FG CF        # selected products only
-python backtest/data_update.py --force      # re-download every year
-python backtest/data_update.py --rebuild-only
+python -m backtest.data_update              # incremental refresh (all products)
+python -m backtest.data_update FG CF        # selected products only
+python -m backtest.data_update --force      # re-download every year
+python -m backtest.data_update --rebuild-only
 ```
 
 Or enable refresh when running a backtest by setting `UPDATE_DATA = True` in `backtest/main.py`.
@@ -53,7 +53,7 @@ Or enable refresh when running a backtest by setting `UPDATE_DATA = True` in `ba
 Edit the configuration block at the top of `backtest/main.py` (`SYMBOLS`, strategy, dates, cash, commission, margin), then:
 
 ```bash
-python backtest/main.py
+python -m backtest.main
 ```
 
 Outputs land in `backtest/results/` (charts, trade log, and optional alpha CSV).
@@ -63,9 +63,9 @@ Outputs land in `backtest/results/` (charts, trade log, and optional alpha CSV).
 Public examples:
 
 ```python
-from strategies.double_ma import DoubleMaStrategy
-from strategies.rsi_mean_reversion import RsiMeanReversionStrategy
-from strategies.my_strategy import MyStrategy
+from .strategies.double_ma import DoubleMaStrategy
+from .strategies.rsi_mean_reversion import RsiMeanReversionStrategy
+from .strategies.my_strategy import MyStrategy
 
 STRATEGY = DoubleMaStrategy
 STRATEGY_PARAMS = {
@@ -110,7 +110,7 @@ FuturesBacktest/
 Minimal single-product sketch:
 
 ```python
-from strategies.base import FuturesStrategyBase
+from .base import FuturesStrategyBase
 import backtrader.indicators as btind
 
 class MyStrategy(FuturesStrategyBase):
@@ -144,7 +144,7 @@ for sym in self.symbols:
         self.buy_signal(symbol=sym)
 ```
 
-Available bar fields on a weighted feed: `open`, `high`, `low`, `close`, `volume`, `openinterest` (OI), and custom line `settle`. Every real contract in the window is on the strategy as `self.products['FG'].contracts['FG2505']` or `self.get_contract('FG2505')`.
+Available bar fields on a weighted feed: `open`, `high`, `low`, `close`, `volume`, `openinterest` (OI), custom line `settle`, and `session` (1 = real print, 0 = dark bar). Every real contract in the window is on the strategy as `self.products['FG'].contracts['FG2505']` or `self.get_contract('FG2505')`.
 
 Orders from `buy_signal()` / `sell_signal()` / `close_signal()` are routed to that product’s calendar contract when `EXECUTE_ON_CONTRACTS = True`. Rolls are handled per product in the base class; do not implement them in `next()`.
 
@@ -169,12 +169,13 @@ Multiplier, margin, and commission are **not** set in `main.py`. Edit `backtest/
 - Source: [CZCE](http://www.czce.com.cn/) historical futures files for **SA**, **FG**, and **CF**.
 - Contract-level history is cleaned and saved as `data/{symbol}.csv`.
 - Daily continuous series uses open-interest weighting of **all listed contracts** that day → `data/{symbol}_weighted.csv` (default `self.data` for the traded product).
-- The strategy is given every loaded product’s weighted series plus **all real contracts** that print in the backtest window (`datas[0]` = default product weighted, `self.products[sym]` = that product).
+- Alignment onto the multi-product calendar **never looks ahead** (`bfill` is off). Days with no exchange print are marked `session=0`; open/high/low flatten to the last close for mark-to-market only. **No orders fill on those bars** (pending entries are deferred to the next real session).
 - Execution (when `EXECUTE_ON_CONTRACTS` is True), **per product**:
   - Dec–Mar trade the **May** contract, Apr–Jul the **September** contract, Aug–Nov the **next January** contract (glass lists all 12 months and cotton lists odd months; fills still use 01/05/09 only).
-  - Roll on the first trading day of April, August, and December: close the old contract at that day's **open**, open the new contract at its **open** (commission on both legs).
+  - Roll on the first **live** session of April, August, and December (both the old and new contracts must print that day): close the old contract at that day's **open**, open the new contract at its **open** (commission on both legs).
   - A signal placed the session before a roll is cancelled and re-routed onto the **new** contract so it fills at that open.
-  - Any leftover lots on a non-calendar feed are swept to the target contract at the next session open.
+  - Any leftover lots on a non-calendar feed are swept to the target contract at the next **live** session open.
+  - Protective stops armed on an entry or roll fill are live for the rest of that session (same-bar range can fill them). They are parked on dark days and restored on the next print.
   - Each roll closes a Backtrader trade, so win rate / expectancy count the roll-out as a completed trade.
   - Set `EXECUTE_ON_CONTRACTS = False` in `backtest/main.py` to fill on the weighted series instead.
 - Trade CSV includes a `symbol` column. Charts (price / signals / position) use the **default** product.

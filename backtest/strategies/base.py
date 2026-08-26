@@ -1,15 +1,10 @@
 """Futures strategy base class for CZCE multi-product backtests."""
 
 from datetime import date, datetime
-import os
-import sys
 
 import backtrader as bt
 
-_BACKTEST_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _BACKTEST_DIR)
-
-from products import normalize_symbol, parse_product
+from ..products import normalize_symbol, parse_product
 
 
 def _to_date(value):
@@ -64,6 +59,7 @@ class FuturesStrategyBase(bt.Strategy):
       self.sell_signal(symbol='CF')     open short on cotton
       self.close_signal(symbol='SA')    close one product
       self.get_position_size(symbol=)   net lots for one product
+      self.is_session(symbol=)          True if this product can fill today
     """
 
     params = (
@@ -91,6 +87,7 @@ class FuturesStrategyBase(bt.Strategy):
         self._protect_stop_by_symbol = {}
         self._stop_distance_by_symbol = {}
         self._stop_price_by_symbol = {}
+        self._deferred_by_symbol = {}
         self._first_print = {}
 
         self.products = {}
@@ -185,16 +182,46 @@ class FuturesStrategyBase(bt.Strategy):
             normalize_symbol(k): _to_date(v)
             for k, v in (self.p.first_print or {}).items()
         }
-        if self.p.execute_on_contracts:
-            self._maybe_roll()
+        self._install_session_exec_gate()
+        self._prepare_session_open()
 
     def prenext_open(self):
-        if self.p.execute_on_contracts:
-            self._maybe_roll()
+        self._prepare_session_open()
 
     def next_open(self):
-        if self.p.execute_on_contracts:
-            self._maybe_roll()
+        self._prepare_session_open()
+
+    def _install_session_exec_gate(self):
+        """Do not fill any order on a bar with session=0 (no exchange print)."""
+        broker = self.broker
+        if getattr(broker, '_fut_session_gate', False):
+            return
+        orig = broker._try_exec
+
+        def gated(order, _orig=orig):
+            data = getattr(order, 'data', None)
+            if data is not None:
+                try:
+                    if hasattr(data.lines, 'session'):
+                        sess = float(data.session[0])
+                        if sess == sess and sess <= 0:
+                            return None
+                except Exception:
+                    pass
+            return _orig(order)
+
+        broker._try_exec = gated
+        broker._fut_session_gate = True
+
+    def _notify(self, qorders=None, qtrades=None):
+        # Order fills are delivered here, after broker.next(). A stop armed
+        # on an open fill must be evaluated on this bar's range, not the next.
+        if qorders is None:
+            qorders = []
+        if qtrades is None:
+            qtrades = []
+        super()._notify(qorders=qorders, qtrades=qtrades)
+        self._fill_protect_stop_if_touched()
 
     def stop(self):
         leftovers = {}
@@ -219,9 +246,7 @@ class FuturesStrategyBase(bt.Strategy):
 
         if order.status == order.Completed:
             if self._is_protect_stop(order):
-                if self._protect_stop_by_symbol.get(symbol) is order:
-                    self._protect_stop_by_symbol.pop(symbol, None)
-                self._stop_distance_by_symbol.pop(symbol, None)
+                self._clear_protect_stop_state(symbol, order=order)
             elif is_roll and self._stop_distance_by_symbol.get(symbol):
                 psz = int(self.getposition(order.data).size)
                 if psz:
@@ -255,6 +280,8 @@ class FuturesStrategyBase(bt.Strategy):
             if self._is_protect_stop(order):
                 if self._protect_stop_by_symbol.get(symbol) is order:
                     self._protect_stop_by_symbol.pop(symbol, None)
+                if order.status in (order.Margin, order.Rejected):
+                    self._clear_protect_stop_state(symbol)
             if self.p.printlog:
                 print(f"  [{date}] Order not filled: {order.getstatusname()}")
 
@@ -273,7 +300,7 @@ class FuturesStrategyBase(bt.Strategy):
 
     def buy(self, data=None, symbol=None, **kwargs):
         data = self._resolve_exec_data(data, symbol=symbol)
-        if self.p.execute_on_contracts and data is None:
+        if data is None:
             return None
         order = super().buy(data=data, **kwargs)
         self._tag_order(order, symbol or self._symbol_of_data(data))
@@ -281,7 +308,7 @@ class FuturesStrategyBase(bt.Strategy):
 
     def sell(self, data=None, symbol=None, **kwargs):
         data = self._resolve_exec_data(data, symbol=symbol)
-        if self.p.execute_on_contracts and data is None:
+        if data is None:
             return None
         order = super().sell(data=data, **kwargs)
         self._tag_order(order, symbol or self._symbol_of_data(data))
@@ -289,10 +316,14 @@ class FuturesStrategyBase(bt.Strategy):
 
     def close(self, data=None, symbol=None, **kwargs):
         if data is not None:
+            if not self._feed_is_session(data):
+                return None
             order = super().close(data=data, **kwargs)
             self._tag_order(order, symbol or self._symbol_of_data(data))
             return order
         symbol = self._resolve_symbol(symbol)
+        if not self.is_session(symbol):
+            return None
         if not self.p.execute_on_contracts:
             data = self._weighted(symbol)
             order = super().close(data=data, **kwargs)
@@ -301,20 +332,21 @@ class FuturesStrategyBase(bt.Strategy):
         self._sync_exec_pointer(symbol)
         last = None
         for feed in self._contract_datas(symbol):
-            if self.getposition(feed).size:
+            if self.getposition(feed).size and self._feed_is_session(feed):
                 last = super().close(data=feed, **kwargs)
                 self._tag_order(last, symbol)
         return last
 
     def _resolve_exec_data(self, data, symbol=None):
         if data is not None:
-            return data
+            return data if self._feed_is_session(data) else None
         symbol = self._resolve_symbol(symbol)
+        if not self.is_session(symbol):
+            return None
         if self.p.execute_on_contracts:
-            if not self._is_listed(symbol):
-                return None
             self._sync_exec_pointer(symbol)
-            return self._exec_data_by_symbol.get(symbol)
+            data = self._exec_data_by_symbol.get(symbol)
+            return data if self._feed_is_session(data) else None
         return self._weighted(symbol)
 
     def _today(self):
@@ -348,6 +380,45 @@ class FuturesStrategyBase(bt.Strategy):
         if first is None or dt is None:
             return True
         return dt >= first
+
+    @staticmethod
+    def _finite(value):
+        try:
+            x = float(value)
+        except (TypeError, ValueError):
+            return False
+        return x == x and abs(x) != float('inf')
+
+    def _feed_is_session(self, data):
+        """True if ``data``'s current bar is a real exchange print."""
+        if data is None:
+            return False
+        try:
+            if hasattr(data.lines, 'session'):
+                sess = float(data.session[0])
+                if sess == sess:
+                    return sess > 0
+        except Exception:
+            pass
+        try:
+            return self._finite(data.close[0]) and float(data.volume[0]) > 0
+        except Exception:
+            return False
+
+    def is_session(self, symbol=None):
+        """True if this product can fill today (listed and a real print)."""
+        symbol = self._resolve_symbol(symbol)
+        if not self._is_listed(symbol):
+            return False
+        weighted = self._weighted(symbol)
+        if not self._feed_is_session(weighted):
+            return False
+        if not self.p.execute_on_contracts:
+            return True
+        code = self._target_code(symbol)
+        if not code:
+            return False
+        return self._feed_is_session(self._data_by_code(code))
 
     def _normalize_roll_map(self, raw):
         if not raw:
@@ -436,15 +507,42 @@ class FuturesStrategyBase(bt.Strategy):
         except Exception:
             return bool(getattr(info, 'is_protect_stop', False))
 
-    def cancel_protect_stop(self, symbol=None, data=None):
+    def _clear_protect_stop_state(self, symbol, order=None):
+        current = self._protect_stop_by_symbol.get(symbol)
+        if order is None or current is None or current is order:
+            self._protect_stop_by_symbol.pop(symbol, None)
+        self._stop_distance_by_symbol.pop(symbol, None)
+        self._stop_price_by_symbol.pop(symbol, None)
+
+    def cancel_protect_stop(self, symbol=None, data=None, clear_spec=False):
         if data is not None and symbol is None:
             symbol = self._symbol_of_data(data)
         symbol = self._resolve_symbol(symbol)
         order = self._protect_stop_by_symbol.pop(symbol, None)
-        if order is None:
-            return
-        if getattr(order, 'alive', lambda: False)():
+        if order is not None and getattr(order, 'alive', lambda: False)():
             self._cancel_broker_order(order)
+        if clear_spec:
+            self._stop_distance_by_symbol.pop(symbol, None)
+            self._stop_price_by_symbol.pop(symbol, None)
+
+    def _park_protect_stop(self, symbol):
+        """Cancel the live stop order but keep price/distance for the next session."""
+        self.cancel_protect_stop(symbol=symbol, clear_spec=False)
+
+    def _restore_protect_stop(self, symbol):
+        price = self._stop_price_by_symbol.get(symbol)
+        if price is None or not self._finite(price):
+            return None
+        pos = int(self.get_position_size(symbol))
+        if not pos:
+            return None
+        data = None
+        if self.p.execute_on_contracts:
+            self._sync_exec_pointer(symbol)
+            data = self._exec_data_by_symbol.get(symbol)
+        return self.place_protect_stop(
+            price, size=abs(pos), data=data, symbol=symbol
+        )
 
     def arm_protect_stop(self, fill_price, is_long, size, data=None,
                          distance=None, symbol=None):
@@ -461,15 +559,16 @@ class FuturesStrategyBase(bt.Strategy):
     def place_protect_stop(self, stop_price, size, data=None, symbol=None):
         """Resting stop on the traded contract. Does not block next()."""
         symbol = self._resolve_symbol(symbol or self._symbol_of_data(data))
-        self.cancel_protect_stop(symbol=symbol)
-        data = self._resolve_exec_data(data, symbol=symbol)
-        if self.p.execute_on_contracts and data is None:
-            return None
         stop_price = float(stop_price)
         size = abs(int(size))
-        if size <= 0:
+        if size <= 0 or not self._finite(stop_price):
             return None
-        pos = int(self.getposition(data).size) if data is not None else int(self.position.size)
+        self._stop_price_by_symbol[symbol] = stop_price
+        self.cancel_protect_stop(symbol=symbol, clear_spec=False)
+        data = self._resolve_exec_data(data, symbol=symbol)
+        if data is None:
+            return None
+        pos = int(self.getposition(data).size)
         if pos > 0:
             order = super().sell(
                 data=data, size=size, exectype=bt.Order.Stop, price=stop_price
@@ -499,8 +598,9 @@ class FuturesStrategyBase(bt.Strategy):
         """If today's contract range already pierced the resting stop, fill now.
 
         Backtrader only evaluates a newly submitted Stop on the next broker
-        cycle. A cloud-hosted stop would be live on the fill bar, so this
-        catches same-bar touches at the stop (or the open if it gapped).
+        cycle. A stop armed on an open fill would be live for the rest of
+        that session, so this catches same-bar touches (or a gap through
+        the open). Dark bars are skipped.
         """
         symbols = [self._resolve_symbol(symbol)] if symbol else list(self.symbols)
         filled_any = False
@@ -516,7 +616,7 @@ class FuturesStrategyBase(bt.Strategy):
                 self._protect_stop_by_symbol.pop(symbol, None)
             return False
         data = getattr(order, 'data', None)
-        if data is None:
+        if data is None or not self._feed_is_session(data):
             return False
         try:
             popen = float(data.open[0])
@@ -525,6 +625,8 @@ class FuturesStrategyBase(bt.Strategy):
             pclose = float(data.close[0])
             stop = float(order.created.price)
         except Exception:
+            return False
+        if not all(self._finite(x) for x in (popen, phigh, plow, pclose, stop)):
             return False
         if order.issell():
             hit = popen <= stop or plow <= stop
@@ -547,8 +649,43 @@ class FuturesStrategyBase(bt.Strategy):
                 queue.remove(order)
             except ValueError:
                 pass
-        self._protect_stop_by_symbol.pop(symbol, None)
+        self._deliver_same_bar_fill(order)
         return True
+
+    def _deliver_same_bar_fill(self, order):
+        """Notify a same-bar stop fill now; drop the delayed broker clone."""
+        notifs = getattr(self.broker, 'notifs', None)
+        if notifs:
+            try:
+                notifs.pop()
+            except IndexError:
+                pass
+        pending_orders = getattr(self, '_orderspending', None)
+        pending_trades = getattr(self, '_tradespending', None)
+        n_orders = len(pending_orders) if pending_orders is not None else 0
+        n_trades = len(pending_trades) if pending_trades is not None else 0
+        add = getattr(self, '_addnotification', None)
+        if callable(add):
+            add(order)
+        extra_trades = []
+        if pending_orders is not None:
+            del pending_orders[n_orders:]
+        if pending_trades is not None:
+            extra_trades = list(pending_trades[n_trades:])
+            del pending_trades[n_trades:]
+        self.notify_order(order)
+        analyzers = list(self.analyzers)
+        analyzers.extend(getattr(self, '_slave_analyzers', []))
+        for analyzer in analyzers:
+            fn = getattr(analyzer, '_notify_order', None)
+            if callable(fn):
+                fn(order)
+        for trade in extra_trades:
+            self.notify_trade(trade)
+            for analyzer in analyzers:
+                fn = getattr(analyzer, '_notify_trade', None)
+                if callable(fn):
+                    fn(trade)
 
     def _is_roll_order(self, order):
         if order is None:
@@ -650,35 +787,91 @@ class FuturesStrategyBase(bt.Strategy):
 
     def _maybe_roll(self):
         """Keep each product's exposure on today's calendar contract."""
-        if not self.p.execute_on_contracts:
-            return
+        self._prepare_session_open()
+
+    def _prepare_session_open(self):
+        """On a dark bar, park fills; on a live session, flush and roll."""
         today = self._today()
         if today is None:
             return
         for symbol in self.symbols:
-            self._maybe_roll_symbol(symbol, today)
+            if not self._is_listed(symbol, today):
+                continue
+            if not self.is_session(symbol):
+                self._defer_session_orders(symbol)
+                continue
+            self._flush_deferred(symbol)
+            if self.p.execute_on_contracts:
+                self._maybe_roll_symbol(symbol, today)
+            self._restore_protect_stop(symbol)
+
+    def _defer_session_orders(self, symbol):
+        """Cancel live orders so they cannot fill on a dark bar; retry later."""
+        bucket = self._deferred_by_symbol.setdefault(symbol, [])
+        self._park_protect_stop(symbol)
+        for order in self._alive_broker_orders():
+            if self._is_roll_order(order):
+                continue
+            if order.status not in (order.Submitted, order.Accepted, order.Partial):
+                continue
+            if self._symbol_of_order(order) != symbol:
+                continue
+            if self._is_protect_stop(order):
+                self._cancel_broker_order(order)
+                if self._protect_stop_by_symbol.get(symbol) is order:
+                    self._protect_stop_by_symbol.pop(symbol, None)
+                continue
+            signed = self._order_signed_size(order)
+            if signed:
+                bucket.append(signed)
+            self._cancel_broker_order(order)
+            self._clear_pending_ref(order.ref)
+
+    def _flush_deferred(self, symbol):
+        intents = self._deferred_by_symbol.pop(symbol, None) or []
+        move = sum(intents)
+        if not move:
+            return
+        if self.p.execute_on_contracts:
+            self._sync_exec_pointer(symbol)
+            data = self._exec_data_by_symbol.get(symbol)
+        else:
+            data = self._weighted(symbol)
+        if data is None or not self._feed_is_session(data):
+            self._deferred_by_symbol[symbol] = intents
+            return
+        if move > 0:
+            order = super().buy(data=data, size=move)
+        else:
+            order = super().sell(data=data, size=abs(move))
+        self._tag_order(order, symbol)
+        self._track_pending(order, symbol)
 
     def _maybe_roll_symbol(self, symbol, today):
         if self._roll_done_on.get(symbol) == today:
             return
-        if not self._is_listed(symbol, today):
-            return
-        self._roll_done_on[symbol] = today
-
         new_code = self._target_code(symbol, today)
         if not new_code:
             return
-
         new_data = self._data_by_code(new_code)
-        if new_data is None:
+        if new_data is None or not self._feed_is_session(new_data):
             if self.p.printlog:
                 print(
-                    f"  [{today}] No feed for {symbol} {new_code}, "
+                    f"  [{today}] No live session for {symbol} {new_code}, "
                     f"keeping {self._exec_code_by_symbol.get(symbol)}"
                 )
             return
 
         held = self._positions_by_data(symbol)
+        old_feeds = [feed for feed, size in held.items() if feed is not new_data and size]
+        if any(not self._feed_is_session(feed) for feed in old_feeds):
+            if self.p.printlog:
+                print(
+                    f"  [{today}] Roll {symbol} delayed: old contract has no print"
+                )
+            return
+
+        self._roll_done_on[symbol] = today
         pos_target = int(self.getposition(new_data).size)
         pos_others = sum(sz for feed, sz in held.items() if feed is not new_data)
 
@@ -745,7 +938,7 @@ class FuturesStrategyBase(bt.Strategy):
     def buy_signal(self, size=None, data=None, symbol=None):
         """Open long at market (futures long entry)."""
         symbol = self._resolve_symbol(symbol or self._symbol_of_data(data))
-        if not self._is_listed(symbol):
+        if not self.is_session(symbol):
             return
         if self.has_pending(symbol):
             return
@@ -761,7 +954,7 @@ class FuturesStrategyBase(bt.Strategy):
     def sell_signal(self, size=None, data=None, symbol=None):
         """Open short at market (futures short entry)."""
         symbol = self._resolve_symbol(symbol or self._symbol_of_data(data))
-        if not self._is_listed(symbol):
+        if not self.is_session(symbol):
             return
         if self.has_pending(symbol):
             return
@@ -780,16 +973,21 @@ class FuturesStrategyBase(bt.Strategy):
             symbol = self._resolve_symbol(symbol or self._symbol_of_data(data))
         else:
             symbol = self._resolve_symbol(symbol)
-        self.cancel_protect_stop(symbol=symbol)
         if self.has_pending(symbol):
             return
+        if data is not None:
+            if not self._feed_is_session(data):
+                return
+        elif not self.is_session(symbol):
+            return
+        self.cancel_protect_stop(symbol=symbol, clear_spec=True)
         if data is not None:
             self._track_pending(self.close(data=data, symbol=symbol), symbol)
             return
         if self.p.execute_on_contracts:
             last = None
             for feed in self._contract_datas(symbol):
-                if self.getposition(feed).size:
+                if self.getposition(feed).size and self._feed_is_session(feed):
                     last = super().close(data=feed)
                     self._tag_order(last, symbol)
                     self._track_pending(last, symbol)

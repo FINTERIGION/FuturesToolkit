@@ -1,11 +1,11 @@
 """
 CZCE futures history download and OI-weighted aggregation.
 
-Usage:
-  python backtest/data_update.py              # incremental: all registered products
-  python backtest/data_update.py FG CF        # selected products only
-  python backtest/data_update.py --force      # re-download every year
-  python backtest/data_update.py --rebuild-only
+Usage (from the repo root):
+  python -m backtest.data_update              # incremental: all registered products
+  python -m backtest.data_update FG CF        # selected products only
+  python -m backtest.data_update --force      # re-download every year
+  python -m backtest.data_update --rebuild-only
 """
 
 from __future__ import annotations
@@ -14,7 +14,6 @@ import argparse
 import hashlib
 import json
 import os
-import sys
 import time
 import urllib.error
 import urllib.request
@@ -22,10 +21,7 @@ from datetime import datetime
 
 import pandas as pd
 
-BACKTEST_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, BACKTEST_DIR)
-
-from products import get_product, list_products, normalize_symbol, require_products
+from .products import get_product, list_products, normalize_symbol, require_products
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CACHE_DIR = os.path.join(ROOT_DIR, 'cache')
@@ -65,14 +61,14 @@ _HTTP_HEADERS = {
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
         'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     ),
-    'Referer': 'http://www.czce.com.cn/',
+    'Referer': 'https://www.czce.com.cn/',
 }
 _TIMEOUT = 45
 _RETRIES = 3
 
 
 def _czce_url(symbol: str, year: int) -> str:
-    base = f'http://www.czce.com.cn/cn/DFSStaticFiles/Future/{year}/FutureDataAllHistory'
+    base = f'https://www.czce.com.cn/cn/DFSStaticFiles/Future/{year}/FutureDataAllHistory'
     if year < 2020:
         return f'{base}/{symbol}.txt'
     return f'{base}/{symbol}FUTURES{year}.txt'

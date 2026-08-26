@@ -2,7 +2,7 @@
 
 import backtrader.indicators as btind
 
-from strategies.base import FuturesStrategyBase
+from .base import FuturesStrategyBase
 
 
 class MyStrategy(FuturesStrategyBase):
@@ -23,6 +23,7 @@ class MyStrategy(FuturesStrategyBase):
       self.get_position_size()          default product net lots
       self.get_position_size('FG')      one product's net lots
       self.has_pending(symbol='FG')     pending order on that product
+      self.is_session(symbol='FG')      True if that product can fill today
 
     Available data:
       self.data / self.weighted         default product's OI-weighted series

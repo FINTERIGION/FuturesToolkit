@@ -2,7 +2,7 @@
 
 import backtrader.indicators as btind
 
-from strategies.base import FuturesStrategyBase
+from .base import FuturesStrategyBase
 
 
 class DoubleMaStrategy(FuturesStrategyBase):
