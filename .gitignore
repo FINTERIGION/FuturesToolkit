@@ -1,4 +1,11 @@
 __pycache__/
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+.env
+.DS_Store
+
 .vscode/
 .cursor/
 .claude/
@@ -7,10 +14,10 @@ data/
 cache/
 results/
 
-# Private strategies: ignore custom modules; keep base, examples, README, .gitkeep
-backtest/strategies/*
-!backtest/strategies/__init__.py
-!backtest/strategies/base.py
-!backtest/strategies/double_ma.py
-!backtest/strategies/rsi_mean_reversion.py
-!backtest/strategies/my_strategy.py
+# Private strategies: ignore custom modules; keep base + tracked examples
+strategies/*
+!strategies/__init__.py
+!strategies/base.py
+!strategies/double_ma.py
+!strategies/rsi_mean_reversion.py
+!strategies/my_strategy.py

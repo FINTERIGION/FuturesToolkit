@@ -1,14 +1,23 @@
 """
 Data Management Module
 Responsible for loading, processing, and updating futures data.
+
+Produces plain pandas DataFrames (no backtrader feed objects). The weighted
+series is aligned/ffilled onto the shared calendar for indicator use; each
+real contract keeps only the bars where it actually printed -- see
+``core.market.build_market_data``, which turns this bundle into a
+``MarketData`` instance.
 """
 
+import logging
 import os
-import pandas as pd
-import backtrader as bt
 
-BACKTEST_DIR = os.path.dirname(os.path.abspath(__file__))
-ROOT_DIR = os.path.dirname(BACKTEST_DIR)
+import pandas as pd
+
+DATAFEED_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.dirname(DATAFEED_DIR)
+
+logger = logging.getLogger(__name__)
 
 from .data_update import DataUpdate
 from .products import require_products
@@ -23,37 +32,6 @@ from .roll_calendar import (
 
 _PRICE_COLS = ['open', 'high', 'low', 'close', 'settle']
 _ALIGN_COLS = ['open', 'high', 'low', 'close', 'settle', 'oi', 'volume']
-
-
-class FuturesDailyData(bt.feeds.PandasData):
-    """
-    Daily futures feed based on PandasData.
-
-    Columns: date, open, high, low, close, settle, oi, volume, session
-
-    Extra custom lines:
-      data.settle   - settlement price
-      data.session  - 1 if this date had a real exchange print, else 0
-    Built-in line mapping:
-      openinterest -> oi column
-    """
-    lines = ('settle', 'session')
-
-    params = (
-        ('datetime',     None),
-        ('open',         'open'),
-        ('high',         'high'),
-        ('low',          'low'),
-        ('close',        'close'),
-        ('volume',       'volume'),
-        ('openinterest', 'oi'),
-        ('settle',       'settle'),
-        ('session',      'session'),
-    )
-
-
-# Backward-compatible alias
-SAWeightedData = FuturesDailyData
 
 
 class DataManager:
@@ -102,19 +80,12 @@ class DataManager:
         for symbol in self.symbols:
             try:
                 path = self.weighted_path(symbol)
-                print(f"[DataManager] Updating {symbol} data ...")
+                logger.info("Updating %s data ...", symbol)
                 DataUpdate(symbol).update()
-                print(f"[DataManager] {symbol} data update done. Path: {path}")
+                logger.info("%s data update done. Path: %s", symbol, path)
             except Exception as e:
-                print(f"[DataManager] Data update failed for {symbol}: {e}")
+                logger.error("Data update failed for %s: %s", symbol, e)
                 raise
-
-    def _feed_from_df(self, df: pd.DataFrame) -> FuturesDailyData:
-        frame = df
-        if 'session' not in frame.columns:
-            frame = frame.copy()
-            frame['session'] = 1.0
-        return FuturesDailyData(dataname=frame)
 
     @staticmethod
     def _align_contract_ohlc(cdf: pd.DataFrame, index: pd.DatetimeIndex) -> pd.DataFrame:
@@ -146,7 +117,7 @@ class DataManager:
         if not os.path.exists(path):
             raise FileNotFoundError(
                 f"Weighted data file not found: {path}\n"
-                "Run python -m backtest.data_update first, or pass update=True "
+                "Run python -m datafeed.data_update first, or pass update=True "
                 "when constructing DataManager."
             )
 
@@ -207,7 +178,7 @@ class DataManager:
         if not os.path.exists(path):
             raise FileNotFoundError(
                 f"Contract data file not found: {path}\n"
-                "Run python -m backtest.data_update first, or pass update=True "
+                "Run python -m datafeed.data_update first, or pass update=True "
                 "when constructing DataManager."
             )
 
@@ -222,28 +193,6 @@ class DataManager:
         df = df[df['contract'] != '']
         df.sort_values(['date', 'contract'], inplace=True)
         return df.reset_index(drop=True)
-
-    def get_bt_feed(
-        self,
-        start_date: str = None,
-        end_date: str = None,
-        symbol: str = None,
-    ) -> FuturesDailyData:
-        """
-        Return a data feed that can be passed directly to backtrader's Cerebro.
-
-        Parameters
-        ----------
-        start_date : str, optional
-        end_date : str, optional
-        symbol : str, optional
-
-        Returns
-        -------
-        FuturesDailyData
-        """
-        df = self.load_dataframe(start_date, end_date, symbol=symbol)
-        return FuturesDailyData(dataname=df)
 
     @staticmethod
     def _codes_in_window(raw: pd.DataFrame, index: pd.DatetimeIndex) -> list:
@@ -270,7 +219,7 @@ class DataManager:
         """Split ``raw`` into (feed_name, frame) pairs for one backtest window.
 
         Same 3-digit code in two decades becomes two segments so 2015 FG501
-        prices are not ffilled into the 2025 FG501 feed.
+        prices are not carried into the 2025 FG501 series.
         """
         if raw.empty or index.empty:
             return []
@@ -288,26 +237,31 @@ class DataManager:
             segments.append((name, grp))
         return segments
 
-    def _align_contracts(self, segments: list, index: pd.DatetimeIndex,
-                         symbol: str) -> tuple:
-        """Align listed contract segments onto ``index``. Returns (feeds, aligned_frames)."""
-        contract_feeds = {}
-        aligned = {}
+    def _raw_contract_frames(self, segments: list, symbol: str) -> dict:
+        """Only-real-prints frames per contract: no calendar reindex, no ffill.
+
+        This is what ``core.market.ContractSeries`` is built from -- a
+        63-contract x 1610-bar union calendar would be ~85% padding; keeping
+        just the real rows is the whole point of the rewrite (see
+        docs/rewrite-plan.md §6).
+        """
+        frames = {}
         for name, cdf in segments:
             if cdf.empty:
-                print(f"[DataManager] Skipping {name}: no rows in {symbol}.csv")
+                logger.warning("Skipping %s: no rows in %s.csv", name, symbol)
                 continue
-            frame = cdf.copy()
-            frame = frame.set_index('date').sort_index()
+            frame = cdf.copy().set_index('date').sort_index()
             frame.index = pd.to_datetime(frame.index).normalize()
             frame = frame[~frame.index.duplicated(keep='last')]
-            aligned_df = self._align_contract_ohlc(frame, index)
-            if aligned_df['close'].notna().sum() == 0:
-                print(f"[DataManager] Skipping {name}: no usable OHLC after align")
+            for col in _ALIGN_COLS:
+                if col not in frame.columns:
+                    frame[col] = float('nan')
+            frame = frame[_ALIGN_COLS].dropna(subset=['close'])
+            if frame.empty:
+                logger.warning("Skipping %s: no usable OHLC", name)
                 continue
-            aligned[name] = aligned_df
-            contract_feeds[name] = self._feed_from_df(aligned_df)
-        return contract_feeds, aligned
+            frames[name] = frame
+        return frames
 
     def _bundle_symbol(
         self,
@@ -316,7 +270,7 @@ class DataManager:
         calendar: pd.DatetimeIndex,
         first_print,
     ) -> dict:
-        """Build weighted + contract feeds for one product on ``calendar``."""
+        """Build the weighted series + real-contract bundle for one product."""
         raw = annotate_expiries(self.load_contracts_dataframe(symbol))
         weighted_df = self._align_contract_ohlc(weighted_src, calendar)
 
@@ -354,11 +308,9 @@ class DataManager:
                 if name in by_name:
                     segments.append((name, by_name[name]))
 
-        contract_feeds, aligned = self._align_contracts(
-            segments, calendar, symbol
-        )
+        contract_frames = self._raw_contract_frames(segments, symbol)
 
-        missing = [c for c in calendar_codes if c not in contract_feeds]
+        missing = [c for c in calendar_codes if c not in contract_frames]
         if missing:
             raise ValueError(
                 f"{symbol} calendar contracts have no aligned OHLC: {missing}"
@@ -369,16 +321,12 @@ class DataManager:
         for dt in calendar:
             key = pd.Timestamp(dt).normalize()
             code = mapping.get(key)
-            if code is None or code not in aligned:
+            frame = contract_frames.get(code) if code else None
+            if frame is None or key not in frame.index:
                 exec_close.append(float('nan'))
                 exec_code.append('')
                 continue
-            row = aligned[code].loc[dt]
-            if float(row.get('session', 0) or 0) <= 0:
-                exec_close.append(float('nan'))
-                exec_code.append('')
-                continue
-            exec_close.append(float(row['close']))
+            exec_close.append(float(frame.loc[key, 'close']))
             exec_code.append(code)
         exec_price_df = pd.DataFrame(
             {'close': exec_close, 'contract': exec_code},
@@ -386,16 +334,15 @@ class DataManager:
         )
 
         n_cal = len(calendar_codes)
-        n_all = len(contract_feeds)
-        print(
-            f"[DataManager] {symbol} feeds: weighted + {n_all} contracts "
-            f"({n_cal} calendar: {', '.join(calendar_codes)})"
+        n_all = len(contract_frames)
+        logger.info(
+            "%s feeds: weighted + %d contracts (%d calendar: %s)",
+            symbol, n_all, n_cal, ', '.join(calendar_codes),
         )
 
         return {
             'weighted_df': weighted_df,
-            'weighted_feed': self._feed_from_df(weighted_df),
-            'contract_feeds': contract_feeds,
+            'contract_frames': contract_frames,
             'contract_by_date': mapping_as_dates(mapping),
             'calendar_codes': calendar_codes,
             'exec_price_df': exec_price_df,
@@ -407,10 +354,10 @@ class DataManager:
         start_date: str = None,
         end_date: str = None,
     ) -> dict:
-        """Build weighted + real-contract feeds for every loaded product.
+        """Build weighted + real-contract bundles for every loaded product.
 
         All products are aligned onto the union of their weighted calendars
-        inside the backtest window so Backtrader can step them together.
+        inside the backtest window so the engine can step them together.
         Missing days are *not* backfilled; ``session=0`` bars are not tradable.
 
         Returns
@@ -460,7 +407,7 @@ class DataManager:
         end_date: str = None,
         symbol: str = None,
     ) -> dict:
-        """Build weighted + all real-contract feeds for one product.
+        """Build weighted + all real-contract frames for one product.
 
         Prefer ``get_universe_bundle`` when loading more than one symbol.
         """

@@ -11,10 +11,13 @@ Contract codes are resolved from ``data/{symbol}.csv`` (CZCE 3-digit YMM or
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Dict, Hashable, Iterable, Optional, Tuple
 
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 Expiry = Tuple[int, int]  # (year, month)
 
@@ -22,7 +25,7 @@ _CONTRACT_RE = re.compile(r'^[A-Za-z]+(\d+)$')
 
 
 def normalize_contract_code(code) -> str:
-    """Strip whitespace so CZCE codes match Backtrader feed names."""
+    """Strip whitespace so CZCE codes match feed names."""
     return str(code).strip().replace(' ', '')
 
 
@@ -183,9 +186,9 @@ def build_date_contract_map(
 
         if code is None:
             if warn and expiry not in warned_expiries:
-                print(
-                    f"[RollCalendar] {dt.date()}: no print for "
-                    f"{expiry[0]}-{expiry[1]:02d}, skipping session"
+                logger.warning(
+                    "%s: no print for %s-%02d, skipping session",
+                    dt.date(), expiry[0], expiry[1],
                 )
                 warned_expiries.add(expiry)
             continue

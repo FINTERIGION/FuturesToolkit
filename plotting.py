@@ -7,8 +7,10 @@ Uses matplotlib to draw and save the following charts:
   4. Price & signals  - close price with buy/sell signal markers
 """
 
-import os
 import datetime
+import logging
+import os
+
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -16,6 +18,8 @@ matplotlib.use('Agg')   # Use a non-interactive backend (works without a display
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from matplotlib.gridspec import GridSpec
+
+logger = logging.getLogger(__name__)
 
 
 # Global plotting style
@@ -49,15 +53,15 @@ class BacktestPlotter:
     Parameters
     ----------
     equity_records : list of dict
-        Output of DailyEquityAnalyzer. Fields: date, equity, position, daily_return.
-        ``position`` is a ``{symbol: net_lots}`` dict covering every loaded product.
+        Fields: date, equity, position, daily_return. ``position`` is a
+        ``{symbol: net_lots}`` dict covering every loaded product.
     trade_logs : list of dict
-        Output of TradeLogAnalyzer. Fields: open_date, close_date, direction, ...
+        Ledger rows. Fields: open_date, close_date, direction, ...
     price_dfs : dict[str, pd.DataFrame]
         OI-weighted close per product (index=date, contains a `close` column);
         used for the price + signals chart. Keyed by product symbol.
     signal_log : list of dict
-        Strategy's full signal_log (all products). Fields: date, price,
+        Engine's full signal_log (all products). Fields: date, price,
         direction ('buy' | 'sell' | 'close'), symbol.
     metrics : dict
         Dictionary of backtest metrics.
@@ -93,7 +97,7 @@ class BacktestPlotter:
         )
         self.symbols = list(symbols) if symbols else list(self.price_dfs.keys())
 
-        self._results_dir   = config.get('results_dir', 'backtest/results')
+        self._results_dir   = config.get('results_dir', 'results')
         self._strategy_name = config.get('strategy_name', 'strategy')
         self._ts            = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
 
@@ -116,7 +120,7 @@ class BacktestPlotter:
             ) * 100
 
         # Per-product position series, extracted from the {symbol: lots} dict
-        # DailyEquityAnalyzer records for every bar.
+        # recorded for every bar.
         self._position_by_symbol = {}
         if not self._equity_df.empty:
             for sym in self.symbols:
@@ -172,23 +176,23 @@ class BacktestPlotter:
         fig.autofmt_xdate()
         ax.grid(True, alpha=0.3)
 
-        # Annotate final metrics
+        # Annotate final metrics below the plot, without clobbering the x-axis label.
         m = self.metrics
         info = (
             f"Total Return: {m.get('total_return', 0):.2f}%  "
             f"Max Drawdown: {m.get('max_drawdown', 0):.2f}%  "
             f"Sharpe: {m.get('sharpe_ratio', 0):.3f}"
         )
-        ax.set_xlabel(info, fontsize=9, color='#8b949e')
+        fig.text(0.5, 0.01, info, ha='center', fontsize=9, color='#8b949e')
 
         path = os.path.join(
             self._results_dir,
             f"{self._strategy_name}_equity_{self._ts}.png"
         )
-        fig.tight_layout()
+        fig.tight_layout(rect=[0, 0.05, 1, 1])
         fig.savefig(path, dpi=150, bbox_inches='tight')
         plt.close(fig)
-        print(f"[Plotter] Equity curve saved: {path}")
+        logger.info("Equity curve saved: %s", path)
         return path
 
     # ------------------------------------------------------------------
@@ -231,7 +235,7 @@ class BacktestPlotter:
         fig.tight_layout()
         fig.savefig(path, dpi=150, bbox_inches='tight')
         plt.close(fig)
-        print(f"[Plotter] Return curve saved: {path}")
+        logger.info("Return curve saved: %s", path)
         return path
 
     # ------------------------------------------------------------------
@@ -280,7 +284,7 @@ class BacktestPlotter:
         fig.tight_layout(rect=[0, 0, 1, 0.96])
         fig.savefig(path, dpi=150, bbox_inches='tight')
         plt.close(fig)
-        print(f"[Plotter] Position chart saved: {path}")
+        logger.info("Position chart saved: %s", path)
         return path
 
     # ------------------------------------------------------------------
@@ -363,7 +367,7 @@ class BacktestPlotter:
         fig.tight_layout(rect=[0, 0, 1, 0.96])
         fig.savefig(path, dpi=150, bbox_inches='tight')
         plt.close(fig)
-        print(f"[Plotter] Price & signals chart saved: {path}")
+        logger.info("Price & signals chart saved: %s", path)
         return path
 
     # ------------------------------------------------------------------
@@ -446,5 +450,5 @@ class BacktestPlotter:
         )
         fig.savefig(path, dpi=150, bbox_inches='tight')
         plt.close(fig)
-        print(f"[Plotter] Summary chart saved: {path}")
+        logger.info("Summary chart saved: %s", path)
         return path

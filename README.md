@@ -1,35 +1,33 @@
-# FuturesBacktest
+# FuturesToolkit
 
-A backtesting framework for **Zhengzhou Commodity Exchange** futures — **SA (soda ash)**, **FG (glass)**, and **CF (cotton)** — built on [Backtrader](https://www.backtrader.com/).
-
-It downloads historical data from the exchange, builds open-interest–weighted daily bars for **signals**, executes on calendar contracts (January / May / September), and exports equity curves, trade logs, and signal charts.
+A self-built daily-bar backtesting engine for **Zhengzhou Commodity Exchange** futures — **SA (soda ash)**, **FG (glass)**, and **CF (cotton)**. It downloads historical data from the exchange, builds open-interest–weighted daily bars for **signals**, executes on calendar contracts (January / May / September), and exports equity curves, trade logs, and signal charts. The engine is self-built: a four-phase day loop (OPEN → INTRABAR → SIGNAL → SETTLE), a weighted-average-cost broker with multi-position margin accounting, a fill-driven trade ledger, and [TA-Lib](https://ta-lib.org/)-backed indicators.
 
 ## Features
 
 - **Data pipeline** — fetch CZCE history per product, clean contract-level OHLC, and aggregate to OI-weighted continuous series
-- **Calendar execution** — signals on the weighted series; fills on real 01/05/09 contracts (Dec–Mar → May, Apr–Jul → Sep, Aug–Nov → next Jan), with automatic rolls at the open on the first session of Apr / Aug / Dec
-- **Multi-product** — load SA / FG / CF together; single-product strategies pick one via `symbol`, multi-product strategies pass `symbol=` on each order
-- **Futures cost model** — per-product multiplier, margin ratio, and commission from `products.py`
-- **Strategy API** — inherit `FuturesStrategyBase` for buy/sell/close helpers and signal logging
-- **Metrics & reports** — Sharpe, max drawdown, win rate, trade CSV, optional R-multiple alpha report
+- **Calendar execution** — signals on the weighted series; fills on real 01/05/09 contracts, with automatic rolls at the open on the first live session of Apr / Aug / Dec
+- **Multi-product** — load SA / FG / CF together; strategies loop over `ctx.symbols` and trade each independently
+- **Futures cost model** — per-product multiplier, margin ratio, and commission from `datafeed/products.py`, with long/short-symmetric equity accounting and daily forced liquidation on a margin breach
+- **Strategy API** — `Strategy` / `SetupContext` / `BarContext`, target-position order semantics (`ctx.set_target`), automatic indicator warmup skipping, protective stops
+- **Metrics & reports** — Sharpe, Sortino, Calmar, max drawdown + recovery, win rate, turnover, capital exposure, per-symbol breakdown, forced-liquidation count
 - **Charts** — equity, returns, position, price & signals, summary plots
-- **Private strategies** — keep research code under `backtest/strategies/`
 
 ## Requirements
 
-- Python 3.8+
+- Python 3.11+
 
 ```
-backtrader
-pandas
-matplotlib
-numpy
+pandas==3.0.1
+numpy==2.4.2
+matplotlib==3.10.8
+TA-Lib==0.7.1
+pytest==9.1.1
 ```
 
 ## Installation
 
 ```bash
-cd FuturesBacktest
+cd FuturesToolkit
 pip install -r requirements.txt
 ```
 
@@ -40,142 +38,138 @@ pip install -r requirements.txt
 Data is pulled from CZCE and written to `data/{SA,FG,CF}.csv` and `data/{SA,FG,CF}_weighted.csv`. Historical years are cached under `cache/` and reused; only the current year is re-downloaded by default.
 
 ```bash
-python -m backtest.data_update              # incremental refresh (all products)
-python -m backtest.data_update FG CF        # selected products only
-python -m backtest.data_update --force      # re-download every year
-python -m backtest.data_update --rebuild-only
+python -m datafeed.data_update              # incremental refresh (all products)
+python -m datafeed.data_update FG CF        # selected products only
+python -m datafeed.data_update --force      # re-download every year
+python -m datafeed.data_update --rebuild-only
 ```
 
-Or enable refresh when running a backtest by setting `UPDATE_DATA = True` in `backtest/main.py`.
+Or pass `--update-data` when running a backtest.
 
 ### 2. Run a backtest
 
-Edit the configuration block at the top of `backtest/main.py` (`SYMBOLS`, strategy, dates, cash, commission, margin), then:
-
 ```bash
-python -m backtest.main
+python runner.py --symbols SA FG CF --start 2020-01-01 --end 2026-12-31 \
+    --strategy double_ma --cash 100000
 ```
 
-Outputs land in `backtest/results/` (charts, trade log, and optional alpha CSV).
+Run `python runner.py --help` for the full flag list (`--slippage`, `--lots`, `--keep-last N` to prune old result files, `--quiet` / `--verbose`). Outputs land in `results/` (charts, trade log CSV).
 
 ### 3. Switch strategies
 
-Public examples:
+Built-in examples, selected via `--strategy`:
 
-```python
-from .strategies.double_ma import DoubleMaStrategy
-from .strategies.rsi_mean_reversion import RsiMeanReversionStrategy
-from .strategies.my_strategy import MyStrategy
-
-STRATEGY = DoubleMaStrategy
-STRATEGY_PARAMS = {
-    'symbol': 'SA',   # or 'FG' / 'CF'
-}
-```
-
-To load only one product’s feeds:
-
-```python
-SYMBOLS = ['FG']
-STRATEGY_PARAMS = {'symbol': 'FG'}
+```bash
+python runner.py --strategy double_ma
+python runner.py --strategy rsi_mean_reversion
+python runner.py --strategy my_strategy      # template for your own strategy
 ```
 
 ## Project Layout
 
 ```
-FuturesBacktest/
-├── requirements.txt
-├── LICENSE
-├── data/                     # Generated CSVs (gitignored)
-├── cache/                    # CZCE yearly raw files (gitignored)
-└── backtest/
-    ├── main.py               # Backtest entry point & config
-    ├── products.py           # SA / FG / CF registry (multiplier, margin, commission)
-    ├── data_update.py        # CZCE download & OI-weighted aggregation
-    ├── data_manager.py       # Load / filter / feed data into Backtrader
-    ├── roll_calendar.py      # Month → Jan/May/Sep contract map
-    ├── backtest_engine.py    # Cerebro runner, analyzers, metrics
-    ├── plotting.py           # Chart generation
-    ├── strategies/           # Base, examples (tracked) + private modules (gitignored)
-    └── results/              # Backtest outputs (gitignored)
+FuturesToolkit/
+├── runner.py                  # CLI entry point
+├── plotting.py                # Chart generation
+├── core/                      # Engine internals
+│   ├── types.py               #   Bar / Order / Fill / OrderType / Reason
+│   ├── market.py              #   MarketData / ProductPanel / ContractSeries
+│   ├── broker.py              #   cash, positions, margin, commission, forced liquidation
+│   ├── ledger.py              #   fill-driven logical trade ledger
+│   ├── engine.py              #   four-phase day loop, rolls, stops, deferral
+│   ├── metrics.py             #   performance metrics
+│   └── indicators.py          #   TA-Lib NaN guard
+├── strategies/                # Strategy base + examples (tracked) + private modules (gitignored)
+│   ├── base.py                #   Strategy / SetupContext / BarContext
+│   ├── double_ma.py
+│   ├── rsi_mean_reversion.py
+│   └── my_strategy.py         #   template
+├── datafeed/                  # Data pipeline
+│   ├── data_update.py         #   CZCE download & OI-weighted aggregation
+│   ├── data_manager.py        #   load / align / bundle data for the engine
+│   ├── products.py            #   SA / FG / CF registry (multiplier, margin, commission)
+│   └── roll_calendar.py       #   month → Jan/May/Sep contract map
+├── tests/                     # pytest suite (synthetic MarketData fixtures)
+├── data/                      # Generated CSVs (gitignored)
+├── cache/                     # CZCE yearly raw files (gitignored)
+└── results/                   # Backtest outputs (gitignored)
 ```
 
 ## Writing a Strategy
 
-1. Subclass `FuturesStrategyBase` from `strategies.base`.
-2. Define indicators in `__init__` and logic in `next()`.
-3. Use `buy_signal()`, `sell_signal()`, `close_signal()`, and `get_position_size()`.
-4. Add research strategies under `backtest/strategies/` (one class per file), or start from `strategies/my_strategy.py`.
+1. Subclass `Strategy` from `strategies.base`.
+2. Precompute full-series indicators in `setup(ctx)` with `ctx.add_indicator` — the engine automatically skips `on_bar` until every registered indicator has a valid value, so strategy code never needs a NaN check.
+3. Implement trading logic in `on_bar(ctx)`.
+4. Add research strategies under `strategies/` (one class per file, gitignored beyond the tracked examples), or start from `strategies/my_strategy.py`. Register the class in `runner.py`'s `STRATEGIES` dict to select it via `--strategy`.
 
 Minimal single-product sketch:
 
 ```python
-from .base import FuturesStrategyBase
-import backtrader.indicators as btind
+import talib
+from .base import Strategy
 
-class MyStrategy(FuturesStrategyBase):
-    params = (('symbol', 'SA'), ('period', 20),)
+class MyStrategy(Strategy):
+    params = {'period': 20, 'lots': 1}
 
-    def __init__(self):
-        super().__init__()
-        self.sma = btind.SMA(self.data.close, period=self.p.period)
+    def setup(self, ctx):
+        for sym in ctx.symbols:
+            ctx.add_indicator('sma', sym, talib.SMA(ctx.close(sym), self.p['period']))
 
-    def next(self):
-        if self._pending_order:
-            return
-        pos = self.get_position_size()
-        if pos == 0 and self.data.close[0] > self.sma[0]:
-            self.buy_signal()
-        elif pos > 0 and self.data.close[0] < self.sma[0]:
-            self.close_signal()
+    def on_bar(self, ctx):
+        for sym in ctx.symbols:
+            if not ctx.can_trade(sym):
+                continue
+            pos = ctx.position(sym)
+            close = ctx.bar(sym).close
+            if pos == 0 and close > ctx.ind('sma', sym):
+                ctx.set_target(sym, self.p['lots'])
+            elif pos > 0 and close < ctx.ind('sma', sym):
+                ctx.close(sym)
 ```
 
-Switch the traded product with `params.symbol` or `STRATEGY_PARAMS['symbol']` (`'SA'`, `'FG'`, or `'CF'`). `self.data` is that product’s weighted series.
+`ctx.set_target(sym, lots)` is idempotent target-position semantics: it computes whatever delta is needed to reach `lots` and queues one order that fills at the next OPEN, reversing directly in a single fill rather than needing a separate close-then-reopen bar.
 
-Multi-product (annotate the product on each order):
+Available on `BarContext`:
 
-```python
-for sym in self.symbols:
-    if self.has_pending(sym):
-        continue
-    pos = self.get_position_size(sym)
-    close = self.get_weighted(sym).close[0]
-    if pos == 0 and close > self.sma[sym][0]:
-        self.buy_signal(symbol=sym)
-```
+| Accessor | Meaning |
+|---|---|
+| `ctx.bar(sym)` | `Bar(open, high, low, close, settle, volume, oi)` for the weighted series |
+| `ctx.ind(name, sym)` | registered indicator value at this bar |
+| `ctx.position(sym)` | net lots (signed) |
+| `ctx.equity` / `cash` / `margin_used` / `available` | account state |
+| `ctx.can_trade(sym)` | listed + real print today + mapped contract live today |
+| `ctx.contract(sym)` | today's calendar contract code, e.g. `'SA509'` |
+| `ctx.set_target(sym, lots)` / `buy(sym, lots)` / `sell(sym, lots)` / `close(sym)` | orders |
+| `ctx.set_stop(sym, price=None, distance=None)` / `cancel_stop(sym)` | protective stop |
+| `ctx.size_for_risk(sym, stop_distance, risk_pct)` | lots sized to risk `risk_pct` of equity on a stop-out |
 
-Available bar fields on a weighted feed: `open`, `high`, `low`, `close`, `volume`, `openinterest` (OI), custom line `settle`, and `session` (1 = real print, 0 = dark bar). Every real contract in the window is on the strategy as `self.products['FG'].contracts['FG2505']` or `self.get_contract('FG2505')`.
-
-Orders from `buy_signal()` / `sell_signal()` / `close_signal()` are routed to that product’s calendar contract when `EXECUTE_ON_CONTRACTS = True`. Rolls are handled per product in the base class; do not implement them in `next()`.
+Orders always fill against that day's calendar contract, resolved fresh by the engine at fill time — strategy code never has to think about which physical contract an order lands on, or handle rolls itself.
 
 ## Configuration Reference
 
-| Parameter | Meaning | Typical default |
-|-----------|---------|-----------------|
-| `SYMBOLS` | Products whose weighted + contract feeds are loaded | `['SA', 'FG', 'CF']` |
-| `STRATEGY_PARAMS['symbol']` | Default product for single-product strategies | `'SA'` |
-| `START_DATE` / `END_DATE` | Backtest window | `2020-01-01` |
-| `INITIAL_CASH` | Starting equity (CNY) | `100000` |
-| `TRADE_SIZE` | Lots per trade (if strategy uses it) | `1` |
-| `SLIPPAGE` | Fill slippage in price points | `0.0` |
-| `EXECUTE_ON_CONTRACTS` | Weighted signals, real-contract fills | `True` |
-| `UPDATE_DATA` | Incremental refresh from CZCE | `False` |
-| `STRATEGY_PARAMS` | Override strategy `params` | `{}` |
+| Flag | Meaning | Default |
+|---|---|---|
+| `--symbols` | Products whose weighted + contract data are loaded | `SA FG CF` |
+| `--start` / `--end` | Backtest window | `2020-01-01` / `2026-12-31` |
+| `--cash` | Starting equity (CNY) | `100000` |
+| `--strategy` | `double_ma` / `rsi_mean_reversion` / `my_strategy` | `double_ma` |
+| `--slippage` | Fill slippage in price points | `0.0` |
+| `--lots` | Lots per trade (strategies that use it) | `1` |
+| `--update-data` | Incremental refresh from CZCE before running | off |
+| `--keep-last N` | Delete result files from all but the N most recent runs | off |
 
-Multiplier, margin, and commission are **not** set in `main.py`. Edit `backtest/products.py` per product (SA/FG multiplier 20, CF 5). Commission is either `commission_rate` (fraction of notional) or `commission_per_lot` (fixed CNY per lot).
+Multiplier, margin, and commission are **not** set on the CLI. Edit `datafeed/products.py` per product (SA/FG multiplier 20, CF 5). Commission is either `commission_rate` (fraction of notional) or `commission_per_lot` (fixed CNY per lot).
 
 ## Data Notes
 
 - Source: [CZCE](http://www.czce.com.cn/) historical futures files for **SA**, **FG**, and **CF**.
 - Contract-level history is cleaned and saved as `data/{symbol}.csv`.
-- Daily continuous series uses open-interest weighting of **all listed contracts** that day → `data/{symbol}_weighted.csv` (default `self.data` for the traded product).
-- Alignment onto the multi-product calendar **never looks ahead** (`bfill` is off). Days with no exchange print are marked `session=0`; open/high/low flatten to the last close for mark-to-market only. **No orders fill on those bars** (pending entries are deferred to the next real session).
-- Execution (when `EXECUTE_ON_CONTRACTS` is True), **per product**:
-  - Dec–Mar trade the **May** contract, Apr–Jul the **September** contract, Aug–Nov the **next January** contract (glass lists all 12 months and cotton lists odd months; fills still use 01/05/09 only).
-  - Roll on the first **live** session of April, August, and December (both the old and new contracts must print that day): close the old contract at that day's **open**, open the new contract at its **open** (commission on both legs).
-  - A signal placed the session before a roll is cancelled and re-routed onto the **new** contract so it fills at that open.
-  - Any leftover lots on a non-calendar feed are swept to the target contract at the next **live** session open.
-  - Protective stops armed on an entry or roll fill are live for the rest of that session (same-bar range can fill them). They are parked on dark days and restored on the next print.
-  - Each roll closes a Backtrader trade, so win rate / expectancy count the roll-out as a completed trade.
-  - Set `EXECUTE_ON_CONTRACTS = False` in `backtest/main.py` to fill on the weighted series instead.
-- Trade CSV includes a `symbol` column. Charts (price / signals / position) use the **default** product.
+- Daily continuous series uses open-interest weighting of **all listed contracts** that day → `data/{symbol}_weighted.csv`.
+- Alignment onto the multi-product calendar **never looks ahead**. Days with no exchange print are marked `session=0`; open/high/low flatten to the last close for mark-to-market only. **No orders fill on those bars** (pending entries are deferred to the next real session). Each real contract stores only the bars where it actually printed — not padded to the full calendar.
+- Execution, per product:
+  - Dec–Mar trade the **May** contract, Apr–Jul the **September** contract, Aug–Nov the **next January** contract.
+  - Roll on the first **live** session of April, August, and December: close the old contract at that day's **open**, open the new contract at its **open** (commission on both legs), folded into the same logical trade in the ledger.
+  - A signal order queued the day before a roll fills against **that day's** calendar contract automatically — the engine resolves the target contract fresh at fill time, so there's no separate redirect step.
+  - Protective stops (`ctx.set_stop`) are checked intrabar with `[low, high]`; a gap through the stop fills at the open instead of the stop price. They're parked on dark days and restored on the next print.
+  - A margin breach at end-of-day settle force-liquidates every open position at that day's settle price.
+- Trade CSV includes a `symbol` column and folds calendar rolls into their logical trade.

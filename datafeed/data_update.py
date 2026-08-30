@@ -2,10 +2,10 @@
 CZCE futures history download and OI-weighted aggregation.
 
 Usage (from the repo root):
-  python -m backtest.data_update              # incremental: all registered products
-  python -m backtest.data_update FG CF        # selected products only
-  python -m backtest.data_update --force      # re-download every year
-  python -m backtest.data_update --rebuild-only
+  python -m datafeed.data_update              # incremental: all registered products
+  python -m datafeed.data_update FG CF        # selected products only
+  python -m datafeed.data_update --force      # re-download every year
+  python -m datafeed.data_update --rebuild-only
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 import os
 import time
 import urllib.error
@@ -22,6 +23,8 @@ from datetime import datetime
 import pandas as pd
 
 from .products import get_product, list_products, normalize_symbol, require_products
+
+logger = logging.getLogger(__name__)
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CACHE_DIR = os.path.join(ROOT_DIR, 'cache')
@@ -96,7 +99,7 @@ def _normalize_columns(columns) -> list:
     mapped = []
     seen = {}
     for col in columns:
-        key = str(col).replace('\ufeff', '').strip().replace(' ', '')
+        key = str(col).replace('﻿', '').strip().replace(' ', '')
         name = _HEADER_MAP.get(key, key)
         if name in seen:
             name = f'{name}_{seen[name]}'
@@ -271,7 +274,7 @@ class DataUpdate:
         current_cache = self.cache_path(self.year)
         current_hash = _file_sha256(current_cache) if os.path.exists(current_cache) else None
         if self._is_up_to_date(force, rebuild_only, refreshed, current_hash):
-            print(f'{self.category} already up to date; skip rebuild.')
+            logger.info('%s already up to date; skip rebuild.', self.category)
             return pd.read_csv(self.raw_path, parse_dates=['date'])
 
         data = self._load_contract_bars()
@@ -279,9 +282,9 @@ class DataUpdate:
         weighted = _build_weighted(data)
         _to_csv_atomic(self._format_dates(weighted), self.weighted_path)
         self._write_meta(current_hash, refreshed)
-        print(
-            f'{self.category} saved {len(data)} contract rows / '
-            f'{len(weighted)} weighted days -> {self.data_dir}'
+        logger.info(
+            '%s saved %d contract rows / %d weighted days -> %s',
+            self.category, len(data), len(weighted), self.data_dir,
         )
         return data
 
@@ -291,18 +294,18 @@ class DataUpdate:
             path = self.cache_path(year)
             is_current = year == self.year
             if not force and not is_current and os.path.exists(path) and os.path.getsize(path) > 64:
-                print(f'{self.category}{year} cache hit, skip download.')
+                logger.info('%s%d cache hit, skip download.', self.category, year)
                 continue
             url = _czce_url(self.category, year)
             try:
                 _http_download(url, path)
                 refreshed.append(year)
-                print(f'{self.category}{year} Update Done.')
+                logger.info('%s%d Update Done.', self.category, year)
             except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError) as exc:
                 if os.path.exists(path) and os.path.getsize(path) > 64:
-                    print(f'{self.category}{year} Update Error ({exc}); keep existing cache.')
+                    logger.warning('%s%d Update Error (%s); keep existing cache.', self.category, year, exc)
                 else:
-                    print(f'{self.category}{year} Update Error ({exc}).')
+                    logger.warning('%s%d Update Error (%s).', self.category, year, exc)
         return refreshed
 
     def _is_up_to_date(self, force, rebuild_only, refreshed, current_hash) -> bool:
@@ -320,12 +323,12 @@ class DataUpdate:
         for year in self.years():
             path = self.cache_path(year)
             if not os.path.exists(path):
-                print(f'Warning: {path} does not exist, skipping ...')
+                logger.warning('%s does not exist, skipping ...', path)
                 continue
             try:
                 parsed = _clean_contract_bars(_read_czce_history(path))
             except (ValueError, KeyError) as exc:
-                print(f'Warning: {path} skipped ({exc})')
+                logger.warning('%s skipped (%s)', path, exc)
                 continue
             frames.append(parsed)
         if not frames:
@@ -386,6 +389,7 @@ def main(argv=None) -> None:
         help='Rebuild CSVs from local cache without downloading',
     )
     args = parser.parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format='%(message)s')
     symbols = require_products(args.symbols or list_products())
     failed = []
     for symbol in symbols:
@@ -393,7 +397,7 @@ def main(argv=None) -> None:
             DataUpdate(symbol).update(force=args.force, rebuild_only=args.rebuild_only)
         except Exception as exc:
             failed.append((symbol, exc))
-            print(f'{symbol} failed: {exc}')
+            logger.error('%s failed: %s', symbol, exc)
     if failed:
         names = ', '.join(sym for sym, _ in failed)
         raise SystemExit(f'Data update failed for: {names}')

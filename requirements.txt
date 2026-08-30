@@ -1,4 +1,5 @@
-backtrader
-pandas
-matplotlib
-numpy
+pandas==3.0.1
+numpy==2.4.2
+matplotlib==3.10.8
+TA-Lib==0.7.1
+pytest==9.1.1
