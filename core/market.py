@@ -68,6 +68,47 @@ class MarketData:
         return len(self.dates)
 
 
+def slice_market(market: MarketData, start: int, end: int) -> MarketData:
+    """Bar-index slice ``[start, end)`` of ``market``, re-based so bar 0 of
+    the result is bar ``start`` of the original -- the result behaves like a
+    standalone :class:`MarketData` for everything downstream (``Engine``,
+    strategies, indicators).
+
+    Used to carve out train/valid/holdout windows for parameter optimization
+    and walk-forward validation without ever handing a strategy a numpy view
+    that reaches past ``end``.
+    """
+    start = max(0, start)
+    end = min(market.n_bars, end)
+    dates = market.dates[start:end]
+
+    products: Dict[str, ProductPanel] = {}
+    for symbol, panel in market.products.items():
+        weighted = {field: arr[start:end] for field, arr in panel.weighted.items()}
+        contract_by_bar = panel.contract_by_bar[start:end]
+
+        contracts: Dict[str, ContractSeries] = {}
+        for code, series in panel.contracts.items():
+            mask = (series.live_bars >= start) & (series.live_bars < end)
+            if not mask.any():
+                continue
+            live_bars = series.live_bars[mask] - start
+            ohlcv = series.ohlcv[mask]
+            contracts[code] = ContractSeries(
+                code=code, start=int(live_bars[0]), live_bars=live_bars, ohlcv=ohlcv,
+            )
+
+        products[symbol] = ProductPanel(
+            symbol=symbol,
+            weighted=weighted,
+            contracts=contracts,
+            contract_by_bar=contract_by_bar,
+            first_bar=max(0, panel.first_bar - start),
+        )
+
+    return MarketData(dates=dates, products=products)
+
+
 def build_market_data(universe: dict) -> MarketData:
     """Build a :class:`MarketData` from ``DataManager.get_universe_bundle()``."""
     calendar: pd.DatetimeIndex = universe['calendar']

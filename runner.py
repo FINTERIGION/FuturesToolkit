@@ -14,32 +14,111 @@ import argparse
 import csv
 import datetime
 import glob
+import json
 import logging
 import os
 import re
 
 from core.engine import Engine
-from core.market import build_market_data
+from core.market import MarketData, build_market_data
 from core.metrics import compute_metrics
 from core.ledger import TRADE_LOG_FIELDS
 from datafeed.data_manager import DataManager
 from datafeed.products import list_products, require_products
 from plotting import BacktestPlotter
+from strategies import discover_strategies
 from strategies.base import BarContext, SetupContext
-from strategies.double_ma import DoubleMaStrategy
-from strategies.my_strategy import MyStrategy
-from strategies.rsi_mean_reversion import RsiMeanReversionStrategy
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_RESULTS_DIR = os.path.join(ROOT_DIR, 'results')
 
-STRATEGIES = {
-    'double_ma': DoubleMaStrategy,
-    'rsi_mean_reversion': RsiMeanReversionStrategy,
-    'my_strategy': MyStrategy,
-}
+STRATEGIES = discover_strategies()
 
 logger = logging.getLogger('futurestoolkit.runner')
+
+
+def run_single_backtest(
+    market: MarketData,
+    strategy_cls: type,
+    params: dict,
+    cash: float,
+    slippage: float = 0.0,
+    warmup_bars: int = 0,
+    bar_context_cls: type = BarContext,
+) -> dict:
+    """Run one backtest with no side effects (no plotting, no file writes).
+
+    Reused by both ``main()`` below and ``research_runner.py`` (parameter
+    optimization runs this once per trial per fold; meta-labeling runs it
+    once per walk-forward fold, with and without the gating wrapper).
+    ``bar_context_cls`` defaults to the normal ``BarContext`` but can be
+    swapped for a wrapper (e.g. ``research.gating``'s recording/gating
+    contexts) that needs the exact same warmup/pad plumbing.
+    """
+    strategy = strategy_cls(**params)
+    engine = Engine(market, strategy, initial_cash=cash, slippage=slippage, warmup_bars=warmup_bars)
+    result = engine.run_backtest(SetupContext, bar_context_cls)
+    metrics = compute_metrics(
+        result['equity_records'], result['trade_logs'], cash,
+        liquidation_count=result['liquidation_count'],
+    )
+    return {'result': result, 'metrics': metrics, 'engine': engine}
+
+
+def parse_param_value(raw: str) -> tuple:
+    """Parse one ``name=value`` CLI token into ``(name, value)``, casting the
+    value to int, then float, then bool, else leaving it a string.
+
+    Shared with ``research_runner.py`` (its ``metalabel`` / ``meta-backtest``
+    commands take the same form) so a param spelled one way on one CLI means
+    the same thing on the other. Distinct from ``optimize``'s ``--param
+    name=kind:args``, which declares a search *range* -- see
+    ``research.space.parse_param_override``.
+    """
+    if '=' not in raw:
+        raise ValueError(f"Invalid --param {raw!r}; expected name=value")
+    name, value = raw.split('=', 1)
+    for caster in (int, float):
+        try:
+            return name, caster(value)
+        except ValueError:
+            continue
+    if value.lower() in ('true', 'false'):
+        return name, value.lower() == 'true'
+    return name, value
+
+
+def resolve_params(strategy_cls: type, args: argparse.Namespace) -> dict:
+    """Build the ``strategy_cls(**overrides)`` dict from the CLI, lowest
+    precedence first: an optimize report's ``best_params``, then ``--lots``,
+    then ``--param``. Only what the user actually asked to change is returned
+    -- ``Strategy.__init__`` merges the class's own ``params`` defaults under
+    it -- so an untouched run behaves exactly as before.
+    """
+    params: dict = {}
+    if getattr(args, 'params_from', None):
+        with open(args.params_from, encoding='utf-8') as f:
+            best = json.load(f)['best_params']
+        params.update(best)
+        logger.info('Params from %s: %s', args.params_from, best)
+    if getattr(args, 'lots', None) is not None:
+        params['lots'] = args.lots
+    for raw in getattr(args, 'param', None) or []:
+        name, value = parse_param_value(raw)
+        params[name] = value
+
+    known = set(getattr(strategy_cls, 'params', {}) or {})
+    unknown = sorted(set(params) - known)
+    if unknown:
+        # Not fatal: `Strategy.__init__` merges anything into `self.p`, and
+        # `--lots` is documented as harmless for strategies that ignore it.
+        # But a typo would otherwise vanish without a trace, so say so.
+        logger.warning(
+            '%s declares no param(s) %s -- passing them through, but the strategy '
+            'will not read them (declared params: %s).',
+            strategy_cls.__name__, unknown, sorted(known) or '<none>',
+        )
+    return params
 
 
 def _parse_args(argv=None) -> argparse.Namespace:
@@ -51,7 +130,14 @@ def _parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument('--cash', type=float, default=100_000.0, help='Initial cash (CNY)')
     parser.add_argument('--strategy', choices=sorted(STRATEGIES), default='double_ma')
     parser.add_argument('--slippage', type=float, default=0.0, help='Fill slippage in price points')
-    parser.add_argument('--lots', type=int, default=1, help='Lots per trade (strategies that use it)')
+    parser.add_argument('--lots', type=int, default=None,
+                         help='Lots per trade (strategies that use it); default 1')
+    parser.add_argument('--params-from', default=None,
+                         help="Load strategy params from a research_runner.py optimize "
+                              "'*_best.json' report, so a tuned parameter set can be run "
+                              'here with the full trade log and charts.')
+    parser.add_argument('--param', action='append', metavar='NAME=VALUE',
+                         help='Override one strategy param; repeatable. Beats --params-from.')
     parser.add_argument('--update-data', action='store_true', help='Refresh CZCE data before running')
     parser.add_argument('--results-dir', default=DEFAULT_RESULTS_DIR)
     parser.add_argument('--keep-last', type=int, default=None,
@@ -92,11 +178,14 @@ def _print_summary(metrics: dict, log_path: str) -> None:
         f"  Max Drawdown        : {metrics.get('max_drawdown', 0):>14.4f} %",
     ]
     recovery_days = metrics.get('max_drawdown_recovery_days')
-    recovery_text = f'{recovery_days} trading days' if recovery_days is not None else 'Not recovered'
+    if recovery_days is not None:
+        recovery_text = f'{recovery_days:>14} trading days'
+    else:
+        recovery_text = f"{'Not recovered':>14}"
     calmar = metrics.get('calmar_ratio', 0)
     calmar_text = f'{calmar:.4f}' if calmar != float('inf') else 'inf'
     lines += [
-        f"  MaxDD Recovery      : {recovery_text:>14}",
+        f"  MaxDD Recovery      : {recovery_text}",
         f"  Calmar Ratio        : {calmar_text:>14}",
         f"  Win Rate            : {metrics.get('win_rate', 0):>14.4f} %",
         f"  Profit/Loss Ratio   : {metrics.get('profit_loss_ratio', 0):>14.4f}",
@@ -156,6 +245,7 @@ def main(argv=None) -> dict:
     symbols = require_products(args.symbols)
     strategy_cls = STRATEGIES[args.strategy]
     strategy_name = strategy_cls.__name__
+    params = resolve_params(strategy_cls, args)
 
     logger.info('=' * 60)
     logger.info('  FuturesToolkit Backtest')
@@ -170,14 +260,8 @@ def main(argv=None) -> dict:
     market = build_market_data(universe)
 
     logger.info('[2/3] Running backtest ...')
-    strategy = strategy_cls(lots=args.lots)
-    engine = Engine(market, strategy, initial_cash=args.cash, slippage=args.slippage)
-    result = engine.run_backtest(SetupContext, BarContext)
-
-    metrics = compute_metrics(
-        result['equity_records'], result['trade_logs'], args.cash,
-        liquidation_count=result['liquidation_count'],
-    )
+    outcome = run_single_backtest(market, strategy_cls, params, args.cash, args.slippage)
+    result, metrics = outcome['result'], outcome['metrics']
 
     os.makedirs(args.results_dir, exist_ok=True)
     log_path = _save_trade_log(result['trade_logs'], args.results_dir, strategy_name)

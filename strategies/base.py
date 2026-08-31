@@ -16,14 +16,32 @@ import numpy as np
 from datafeed.products import product_costs
 
 from core.indicators import guard
+from core.params import Categorical, Float, Int, Spec
 from core.types import Bar
+
+__all__ = [
+    'Strategy', 'SetupContext', 'BarContext', 'Int', 'Float', 'Categorical', 'Spec',
+]
 
 
 class Strategy:
     """Subclass and implement ``setup``/``on_bar``. ``params`` is a class-level
-    dict of defaults; instantiate with ``MyStrategy(**overrides)``."""
+    dict of defaults; instantiate with ``MyStrategy(**overrides)``.
+
+    ``space`` optionally declares the tunable search space for parameter
+    optimization: ``{param_name: Int(...) | Float(...) | Categorical(...)}``.
+    Params not listed in ``space`` and not in ``fixed_params`` get a
+    heuristic space inferred from their default value (see
+    ``research.space.resolve_space``). ``fixed_params`` lists params that
+    should never be tuned (position sizing, risk knobs, etc.). ``constraints``
+    is a tuple of ``callable(params_dict) -> bool``; a trial whose sampled
+    params fail any constraint is pruned rather than scored.
+    """
 
     params: dict = {}
+    space: dict = {}
+    fixed_params: tuple = ('lots',)
+    constraints: tuple = ()
 
     def __init__(self, **overrides):
         self.p = {**type(self).params, **overrides}

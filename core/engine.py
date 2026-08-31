@@ -33,6 +33,7 @@ class Engine:
         strategy,
         initial_cash: float = 100_000.0,
         slippage: float = 0.0,
+        warmup_bars: int = 0,
     ):
         self.market = market
         self.symbols = market.symbols
@@ -49,11 +50,36 @@ class Engine:
         self.live_stop: Dict[str, dict] = {}    # {'price', 'contract'} currently resting
 
         self.indicators: Dict[tuple, "object"] = {}
-        self.warmup_index = 0
+        # ``add_indicator`` (called from ``strategy.setup``) only ever raises
+        # this -- it never lowers it -- so a caller-supplied floor (used by
+        # research/runner_api.py to hide a leading pad window from both
+        # trading and the equity curve) survives indicator registration.
+        self.warmup_index = int(warmup_bars)
+        # Floor on ``record_start``, kept separate from ``warmup_index`` only
+        # so that code assigning to the latter directly can never make the
+        # equity curve start *earlier* than the caller asked for.
+        self._record_from = int(warmup_bars)
 
         self.equity_records: List[dict] = []
         self.signal_log: List[dict] = []
         self._prev_equity = initial_cash
+
+    @property
+    def record_start(self) -> int:
+        """First bar that appears in ``equity_records``.
+
+        Never earlier than ``warmup_index``, which ``add_indicator`` raises
+        past the caller's floor whenever the registered indicators need more
+        history than the supplied ``warmup_bars`` covers. Bars in
+        ``[warmup_bars, warmup_index)`` are ones ``_signal_phase`` skips
+        entirely, so recording them would prepend a run of flat, zero-return
+        bars that no decision of the strategy's produced -- deflating the
+        window's Sharpe, volatility and capital exposure by an amount that
+        varies with each parameter set's lookback, i.e. unevenly across the
+        trials of one study. ``research/runner_api.run_window`` reports the
+        absolute bar this lands on as ``effective_start``.
+        """
+        return max(self._record_from, self.warmup_index)
 
     # ------------------------------------------------------------------
     # Contract / price helpers
@@ -251,6 +277,15 @@ class Engine:
                 self.ledger.process_fill(f)
             equity, margin_used, available = self.broker.mark_to_market(lookup)
 
+        if i < self.record_start:
+            # Warmup/pad window: valued for bookkeeping continuity only.
+            # Excluded from the equity curve so a research window's metrics
+            # reflect only bars the strategy actually traded on, not the
+            # history before it -- neither the caller's pad nor the extra
+            # bars an indicator's own lookback pushed the start out by.
+            self._prev_equity = equity
+            return
+
         prev = self._prev_equity
         daily_return = (equity - prev) / prev if prev else 0.0
         position = {sym: self.broker.net_position(sym) for sym in self.symbols}
@@ -278,7 +313,7 @@ class Engine:
 
         if self.market.n_bars:
             last_date = _to_date(self.market.dates[-1])
-            self.ledger.finish(self.broker, last_date)
+            self.ledger.finish(self.broker, last_date, last_bar=self.market.n_bars - 1)
 
         on_finish = getattr(self.strategy, 'on_finish', None)
         if callable(on_finish):

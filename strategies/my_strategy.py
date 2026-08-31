@@ -13,7 +13,14 @@ class MyStrategy(Strategy):
          engine skips ``on_bar`` until every registered indicator has a
          valid value -- no manual NaN checks needed).
       2. Implement trading logic in ``on_bar``.
-      3. Or add a new file under strategies/ and register it in runner.py.
+      3. Or add a new file under strategies/ -- it is picked up automatically
+         by ``strategies.discover_strategies()`` (used by runner.py and
+         research_runner.py), no registration needed.
+      4. Optionally declare a ``space`` alongside ``params`` to control how
+         ``research_runner.py optimize`` searches this strategy's parameters,
+         e.g. ``space = {'period': Int(5, 60)}``. If omitted, a space is
+         inferred from each param's default value (see
+         ``research_runner.py show-space``).
 
     Available on ``BarContext``:
       ctx.bar(sym)                  Bar(open, high, low, close, settle, volume, oi)

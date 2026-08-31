@@ -27,7 +27,7 @@ TRADE_LOG_FIELDS = [
     'contract', 'contracts', 'n_rolls',
     'open_price', 'close_price', 'size',
     'gross_pnl', 'commission', 'net_pnl', 'margin_used',
-    'open_at_end', 'forced',
+    'open_at_end', 'forced', 'open_bar', 'close_bar',
 ]
 
 
@@ -85,6 +85,7 @@ class Ledger:
                 row['forced'] = 1
             if new == 0 or (prev > 0) != (new > 0):
                 row['close_date'] = fill.date
+                row['close_bar'] = fill.bar_index
                 self._finalize(symbol, row)
                 self._open.pop(symbol, None)
                 row = None
@@ -104,7 +105,7 @@ class Ledger:
             if fill.contract not in row['contracts']:
                 row['contracts'].append(fill.contract)
 
-    def finish(self, broker: Broker, last_date: Date) -> None:
+    def finish(self, broker: Broker, last_date: Date, last_bar: Optional[int] = None) -> None:
         """Close out rows still open at the end of the run, at their last mark."""
         for (symbol, contract), pos in list(broker.positions.items()):
             row = self._open.get(symbol)
@@ -117,6 +118,7 @@ class Ledger:
             row['gross_pnl'] += (pos.last_mark - pos.avg_entry) * pos.size * multiplier
             row['open_at_end'] = 1
             row['close_date'] = last_date
+            row['close_bar'] = last_bar
             if contract not in row['contracts']:
                 row['contracts'].append(contract)
             self._finalize(symbol, row)
@@ -133,6 +135,8 @@ class Ledger:
             'direction': 'long' if net > 0 else 'short',
             'open_date': fill.date,
             'close_date': None,
+            'open_bar': fill.bar_index,
+            'close_bar': None,
             'contract': fill.contract,
             'contracts': [],
             'roll_days': set(),
@@ -150,6 +154,8 @@ class Ledger:
             'trade_id': row['id'],
             'open_date': row['open_date'],
             'close_date': row['close_date'],
+            'open_bar': row['open_bar'],
+            'close_bar': row['close_bar'],
             'direction': row['direction'],
             'symbol': symbol,
             'contract': row['contract'],

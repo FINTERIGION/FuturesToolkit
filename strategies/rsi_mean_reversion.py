@@ -2,7 +2,7 @@
 
 import talib
 
-from .base import Strategy
+from .base import Int, Strategy
 
 
 class RsiMeanReversionStrategy(Strategy):
@@ -13,6 +13,12 @@ class RsiMeanReversionStrategy(Strategy):
     """
 
     params = {'rsi_period': 14, 'oversold': 30, 'overbought': 70, 'lots': 1}
+    space = {
+        'rsi_period': Int(5, 40),
+        'oversold': Int(10, 40),
+        'overbought': Int(60, 90),
+    }
+    constraints = (lambda p: p['oversold'] < p['overbought'],)
 
     def setup(self, ctx):
         for sym in ctx.symbols:
