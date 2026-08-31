@@ -5,6 +5,9 @@ Usage (from the repo root):
   python runner.py --symbols SA FG CF MA TA SR OI --start 2020-01-01 --end 2026-12-31 \
       --strategy double_ma --cash 100000
 
+To replay a tuned parameter set from ``research_runner.py optimize``, point
+``--params-from`` at its ``*_best.json`` report.
+
 Run ``python runner.py --help`` for the full flag list.
 """
 
@@ -26,11 +29,18 @@ from core.ledger import TRADE_LOG_FIELDS
 from datafeed.data_manager import DataManager
 from datafeed.products import list_products, require_products
 from plotting import BacktestPlotter
-from strategies import discover_strategies
+from strategies import discover_strategies, load_strategy
 from strategies.base import BarContext, SetupContext
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_RESULTS_DIR = os.path.join(ROOT_DIR, 'results')
+
+DEFAULT_SYMBOLS = ['SA', 'FG', 'CF', 'MA', 'TA', 'SR', 'OI']
+DEFAULT_START = '2020-01-01'
+DEFAULT_END = '2026-12-31'
+DEFAULT_CASH = 100_000.0
+DEFAULT_SLIPPAGE = 0.0
+DEFAULT_STRATEGY = 'double_ma'
 
 STRATEGIES = discover_strategies()
 
@@ -44,20 +54,15 @@ def run_single_backtest(
     cash: float,
     slippage: float = 0.0,
     warmup_bars: int = 0,
-    bar_context_cls: type = BarContext,
 ) -> dict:
     """Run one backtest with no side effects (no plotting, no file writes).
 
-    Reused by both ``main()`` below and ``research_runner.py`` (parameter
-    optimization runs this once per trial per fold; meta-labeling runs it
-    once per walk-forward fold, with and without the gating wrapper).
-    ``bar_context_cls`` defaults to the normal ``BarContext`` but can be
-    swapped for a wrapper (e.g. ``research.gating``'s recording/gating
-    contexts) that needs the exact same warmup/pad plumbing.
+    Reused by both ``main()`` below and ``research_runner.py``, which runs it
+    once per trial per fold of the parameter search.
     """
     strategy = strategy_cls(**params)
     engine = Engine(market, strategy, initial_cash=cash, slippage=slippage, warmup_bars=warmup_bars)
-    result = engine.run_backtest(SetupContext, bar_context_cls)
+    result = engine.run_backtest(SetupContext, BarContext)
     metrics = compute_metrics(
         result['equity_records'], result['trade_logs'], cash,
         liquidation_count=result['liquidation_count'],
@@ -69,11 +74,8 @@ def parse_param_value(raw: str) -> tuple:
     """Parse one ``name=value`` CLI token into ``(name, value)``, casting the
     value to int, then float, then bool, else leaving it a string.
 
-    Shared with ``research_runner.py`` (its ``metalabel`` / ``meta-backtest``
-    commands take the same form) so a param spelled one way on one CLI means
-    the same thing on the other. Distinct from ``optimize``'s ``--param
-    name=kind:args``, which declares a search *range* -- see
-    ``research.space.parse_param_override``.
+    Distinct from ``optimize``'s ``--param name=kind:args``, which declares a
+    search *range* -- see ``research.space.parse_param_override``.
     """
     if '=' not in raw:
         raise ValueError(f"Invalid --param {raw!r}; expected name=value")
@@ -123,13 +125,16 @@ def resolve_params(strategy_cls: type, args: argparse.Namespace) -> dict:
 
 def _parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='FuturesToolkit backtest runner.')
-    parser.add_argument('--symbols', nargs='+', default=['SA', 'FG', 'CF', 'MA', 'TA', 'SR', 'OI'],
-                         help=f'Products to load (default: all registered; registered: {", ".join(list_products())})')
-    parser.add_argument('--start', default='2020-01-01', help="Backtest start date 'YYYY-MM-DD'")
-    parser.add_argument('--end', default='2026-12-31', help="Backtest end date 'YYYY-MM-DD'")
-    parser.add_argument('--cash', type=float, default=100_000.0, help='Initial cash (CNY)')
-    parser.add_argument('--strategy', choices=sorted(STRATEGIES), default='double_ma')
-    parser.add_argument('--slippage', type=float, default=0.0, help='Fill slippage in price points')
+    parser.add_argument('--symbols', nargs='+', default=list(DEFAULT_SYMBOLS),
+                         help=f'Products to load (default: {" ".join(DEFAULT_SYMBOLS)}; '
+                              f'registered: {", ".join(list_products())})')
+    parser.add_argument('--start', default=DEFAULT_START, help="Backtest start date 'YYYY-MM-DD'")
+    parser.add_argument('--end', default=DEFAULT_END, help="Backtest end date 'YYYY-MM-DD'")
+    parser.add_argument('--cash', type=float, default=DEFAULT_CASH, help='Initial cash (CNY)')
+    parser.add_argument('--strategy', choices=sorted(STRATEGIES), default=DEFAULT_STRATEGY,
+                         help='Strategy to run')
+    parser.add_argument('--slippage', type=float, default=DEFAULT_SLIPPAGE,
+                         help='Fill slippage in price points')
     parser.add_argument('--lots', type=int, default=None,
                          help='Lots per trade (strategies that use it); default 1')
     parser.add_argument('--params-from', default=None,
@@ -255,7 +260,7 @@ def main(argv=None) -> dict:
     _configure_logging(args)
 
     symbols = require_products(args.symbols)
-    strategy_cls = STRATEGIES[args.strategy]
+    strategy_cls = load_strategy(args.strategy)
     strategy_name = strategy_cls.__name__
     params = resolve_params(strategy_cls, args)
 

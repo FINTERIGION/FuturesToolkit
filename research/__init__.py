@@ -1,4 +1,4 @@
-"""Research tools: Optuna parameter optimization and meta-label filtering.
+"""Research tools: Optuna parameter optimization with walk-forward validation.
 
 Everything in this package is strategy-agnostic -- it operates on any
 ``strategies.base.Strategy`` subclass through its declared or inferred

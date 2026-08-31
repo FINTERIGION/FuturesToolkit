@@ -13,24 +13,9 @@ from core.market import MarketData, build_market_data, slice_market
 from datafeed.data_manager import DataManager
 from datafeed.products import require_products
 from runner import run_single_backtest
-from strategies.base import BarContext
 from research.splits import Window
 
 logger = logging.getLogger(__name__)
-
-
-def slice_start(window: Window, pad: int) -> int:
-    """First bar (in ``market``'s own numbering) of the slice ``run_window``
-    builds for ``window`` at ``pad`` bars of warmup.
-
-    Exported because callers that hand the strategy a *bar-indexed array* --
-    ``research.metalabel``'s per-bar ``P(win)`` being the one that exists --
-    have to convert between absolute and slice-local numbering with exactly
-    the formula ``run_window`` used. A second, independently-drifting copy of
-    ``max(0, window.start - pad)`` is precisely the off-by-``lo`` bug that the
-    trade-log remapping below already exists to prevent.
-    """
-    return max(0, window.start - pad)
 
 
 def load_market(symbols, start: str, end: str, update: bool = False) -> MarketData:
@@ -53,7 +38,6 @@ def run_window(
     cash: float,
     slippage: float = 0.0,
     pad: int = 0,
-    bar_context_cls: type = BarContext,
 ) -> dict:
     """Run one *isolated* backtest over ``window``: fresh cash, flat
     position, on a slice that starts ``pad`` bars earlier (for indicator
@@ -83,12 +67,11 @@ def run_window(
     engine drops the un-tradeable head bars from the curve as well, leaving
     the list correspondingly shorter.
     """
-    lo = slice_start(window, pad)
+    lo = max(0, window.start - pad)
     sliced = slice_market(market, lo, window.end)
     warmup_bars = window.start - lo
     outcome = run_single_backtest(
-        sliced, strategy_cls, params, cash, slippage,
-        warmup_bars=warmup_bars, bar_context_cls=bar_context_cls,
+        sliced, strategy_cls, params, cash, slippage, warmup_bars=warmup_bars,
     )
 
     if lo:

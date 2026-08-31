@@ -1,6 +1,5 @@
 """Tests for the research package: bar-index-slicing/warmup correctness,
-walk-forward splitting, Optuna search-space resolution, and meta-labeling's
-purge/gating logic.
+walk-forward splitting, and Optuna search-space resolution.
 
 Uses synthetic MarketData throughout (via tests/conftest.py's builders, plus
 a locally-built trending/cyclical series so the bundled strategies actually
@@ -21,13 +20,9 @@ from core.params import Int
 from strategies import discover_strategies
 from strategies.base import BarContext, SetupContext, Strategy
 
-from research.gating import MetaFilteredStrategy
-from research.metalabel import (
-    _slice_metrics, evaluate_meta_backtest, extract_events, fit_meta_model, purge_events,
-)
 from research.objective import _finite, score
 from research.optimize import run_study
-from research.runner_api import run_window, slice_start
+from research.runner_api import run_window
 from research.space import resolve_space
 from research.splits import Window, anchored_walk_forward
 from research.warmup import probe_warmup
@@ -315,204 +310,6 @@ def test_score_penalizes_excess_drawdown():
 
 
 # ---------------------------------------------------------------------
-# Gating equivalence (parametrized over every discovered strategy)
-# ---------------------------------------------------------------------
-
-@pytest.mark.parametrize('name', sorted(ALL_STRATEGIES))
-def test_meta_filtered_strategy_threshold_zero_matches_baseline(market, name):
-    cls = ALL_STRATEGIES[name]
-    params = dict(getattr(cls, 'params', {}) or {})
-    window = Window('full', 0, market.n_bars)
-
-    baseline = run_window(market, cls, params, window, cash=100_000.0, pad=0)
-    proba = {'SA': np.full(market.n_bars, 0.5)}  # always-valid, never NaN
-
-    def factory(**_ignored):
-        return MetaFilteredStrategy(cls(**params), proba, meta_threshold=0.0)
-
-    gated = run_window(market, factory, {}, window, cash=100_000.0, pad=0)
-    assert baseline['result']['trade_logs'] == gated['result']['trade_logs']
-
-
-@pytest.mark.parametrize('name', sorted(TUNABLE_STRATEGIES))
-def test_meta_filtered_strategy_threshold_above_one_blocks_all_entries(market, name):
-    cls = TUNABLE_STRATEGIES[name]
-    params = dict(getattr(cls, 'params', {}) or {})
-    window = Window('full', 0, market.n_bars)
-    proba = {'SA': np.full(market.n_bars, 0.5)}
-
-    # A cross-sectional strategy needs more than one product to define a
-    # cross-section at all, so it never opens a position on this
-    # single-product ``market`` fixture -- nothing for the gate to reject.
-    baseline = run_window(market, cls, params, window, cash=100_000.0, pad=0)
-    if not baseline['result']['trade_logs']:
-        pytest.skip(f'{name} never opens a position on this single-product market')
-
-    def factory(**_ignored):
-        return MetaFilteredStrategy(cls(**params), proba, meta_threshold=1.1)
-
-    gated = run_window(market, factory, {}, window, cash=100_000.0, pad=0)
-    assert gated['result']['trade_logs'] == []
-    assert gated['engine'].strategy.threshold_rejected_count > 0
-
-
-def test_gating_reads_proba_at_absolute_bars_on_an_offset_slice(market):
-    """A window whose pad does not reach bar 0 makes the engine's bar 0 land
-    at an absolute bar > 0. ``proba`` is indexed absolutely, so the gate must
-    apply ``bar_offset``; without it every lookup lands ``lo`` bars early and
-    a fully-permissive array reads as all-NaN (i.e. blocks everything)."""
-    from strategies.double_ma import DoubleMaStrategy
-
-    params = {'fast_period': 3, 'slow_period': 8, 'lots': 1}
-    window, pad = Window('offset', 400, 700), 50
-    lo = slice_start(window, pad)
-    assert lo == 350, 'precondition: this window/pad really must be offset from bar 0'
-
-    baseline = run_window(market, DoubleMaStrategy, params, window, cash=100_000.0, pad=pad)
-
-    # Permissive over exactly the window's absolute bars, NaN everywhere else.
-    proba = {'SA': np.full(market.n_bars, np.nan)}
-    proba['SA'][window.start:window.end] = 1.0
-
-    def factory(**_ignored):
-        return MetaFilteredStrategy(
-            DoubleMaStrategy(**params), proba, bar_offset=lo, meta_threshold=0.5,
-        )
-
-    gated = run_window(market, factory, {}, window, cash=100_000.0, pad=pad)
-    assert baseline['result']['trade_logs'] == gated['result']['trade_logs']
-    assert gated['engine'].strategy.nan_count == 0
-
-    def wrong_offset_factory(**_ignored):
-        return MetaFilteredStrategy(
-            DoubleMaStrategy(**params), proba, bar_offset=0, meta_threshold=0.5,
-        )
-
-    mis = run_window(market, wrong_offset_factory, {}, window, cash=100_000.0, pad=pad)
-    assert mis['result']['trade_logs'] == [], 'slice-local lookup should read the NaN region'
-
-
-def test_gating_treats_out_of_range_bars_as_blocked(market):
-    """A proba array shorter than the run must block rather than IndexError."""
-    from strategies.double_ma import DoubleMaStrategy
-
-    params = {'fast_period': 3, 'slow_period': 8, 'lots': 1}
-    window = Window('full', 0, market.n_bars)
-    # Length 1: only bar 0 is in range, and bar 0 is always inside indicator
-    # warmup, so every lookup the gate actually performs is out of range.
-    proba = {'SA': np.full(1, 1.0)}
-
-    def factory(**_ignored):
-        return MetaFilteredStrategy(DoubleMaStrategy(**params), proba, meta_threshold=0.5)
-
-    gated = run_window(market, factory, {}, window, cash=100_000.0, pad=0)
-    assert gated['result']['trade_logs'] == []
-    assert gated['engine'].strategy.out_of_range_count > 0
-
-    # ... unless the caller says missing data should fall the other way.
-    def passing_factory(**_ignored):
-        return MetaFilteredStrategy(
-            DoubleMaStrategy(**params), proba, meta_threshold=0.5, on_missing='pass')
-
-    passed = run_window(market, passing_factory, {}, window, cash=100_000.0, pad=0)
-    baseline = run_window(market, DoubleMaStrategy, params, window, cash=100_000.0, pad=0)
-    assert passed['result']['trade_logs'] == baseline['result']['trade_logs']
-    assert passed['engine'].strategy.blocked_count == 0
-
-
-# ---------------------------------------------------------------------
-# _slice_metrics / evaluate_meta_backtest
-# ---------------------------------------------------------------------
-
-def test_slice_metrics_attributes_trades_by_close_bar(market):
-    """Trades belong to the window their P&L is booked in, and the equity
-    slice is taken relative to the *run's* start, not to bar 0."""
-    from strategies.double_ma import DoubleMaStrategy
-
-    params = {'fast_period': 3, 'slow_period': 8, 'lots': 1}
-    full = Window('full', 100, 800)
-    run = run_window(market, DoubleMaStrategy, params, full, cash=100_000.0, pad=100)
-    result = run['result']
-
-    inner = Window('inner', 300, 600)
-    metrics = _slice_metrics(run, inner, 100_000.0)
-
-    expected = [
-        t for t in result['trade_logs']
-        if t['close_bar'] is not None and inner.start <= t['close_bar'] < inner.end
-    ]
-    assert metrics.get('n_trades', 0) == len(expected)
-    assert expected, 'fixture should produce trades closing inside the inner window'
-    # Equity slice is offset by the run's own start, not read from index 0.
-    assert len(result['equity_records'][inner.start - full.start:inner.end - full.start]) == inner.n_bars
-
-
-def test_evaluate_meta_backtest_isolates_the_filter_from_oof_coverage(market):
-    """gated-vs-baseline must reflect the filter's decisions and nothing else.
-
-    Most bars carry no out-of-fold prediction (only events inside a fold's
-    valid window get one), so if those were blocked the gated arm would differ
-    from the baseline for reasons that have nothing to do with the model. The
-    load-bearing assertion is the threshold=0.0 case: when the filter rejects
-    nothing, gated must be trade-for-trade identical to the baseline.
-    """
-    from strategies.double_ma import DoubleMaStrategy
-
-    params = {'fast_period': 3, 'slow_period': 8, 'lots': 1}
-    bundle = fit_meta_model(
-        market, DoubleMaStrategy, params, cash=100_000.0,
-        n_folds=3, embargo=5, holdout_frac=0.2, min_events_per_fold=5, reserve_bars=20,
-    )
-
-    permissive = evaluate_meta_backtest({**bundle, 'threshold': 0.0}, market, n_random=3, seed=0)
-    assert permissive['n_rejected'] == 0
-    assert permissive['gated_metrics'] == permissive['baseline_metrics'], (
-        'with nothing rejected the gated arm must reproduce the baseline exactly'
-    )
-    assert permissive['gate_counters']['blocked_total'] == 0
-    # Nothing rejected -> the random comparison is a point mass, not a verdict.
-    assert permissive['random_baseline']['degenerate'] is True
-    assert permissive['random_baseline']['beats_random'] is None
-    assert permissive['random_baseline']['gated_percentile'] is None
-
-    strict = evaluate_meta_backtest({**bundle, 'threshold': 1.1}, market, n_random=3, seed=0)
-    assert strict['n_kept'] == 0
-    assert strict['n_rejected'] == strict['n_events_scored']
-    assert strict['gate_counters']['threshold_rejected'] > 0
-    assert strict['gated_metrics'] != strict['baseline_metrics']
-
-
-def test_evaluate_meta_backtest_reports_consistent_counts(market):
-    """Bookkeeping invariants for the gated-vs-random comparison."""
-    from strategies.double_ma import DoubleMaStrategy
-
-    params = {'fast_period': 3, 'slow_period': 8, 'lots': 1}
-    bundle = fit_meta_model(
-        market, DoubleMaStrategy, params, cash=100_000.0,
-        n_folds=3, embargo=5, holdout_frac=0.2, min_events_per_fold=5, reserve_bars=20,
-    )
-    res = evaluate_meta_backtest(bundle, market, n_random=5, seed=0)
-
-    assert res['n_kept'] + res['n_rejected'] == res['n_events_scored']
-    assert res['window']['start'] < res['window']['end']
-    assert res['rejected_net_pnl_positive'] == (res['rejected_net_pnl'] > 0)
-    for key in ('baseline_metrics', 'gated_metrics', 'random_baseline'):
-        assert res[key], f'{key} should not be empty'
-    assert res['random_baseline']['n_random'] == 5
-
-    # Coverage is a fraction of the signals actually present in the window.
-    assert res['n_events_scored'] <= res['n_events_in_window']
-    assert 0.0 < res['oof_coverage'] <= 1.0
-
-    # The evaluation window must stay clear of the holdout the bundle locked away.
-    _folds, holdout = anchored_walk_forward(
-        market.n_bars, reserve_bars=bundle['reserve_bars'], n_folds=bundle['n_folds'],
-        embargo=bundle['embargo'], holdout_frac=bundle['holdout_frac'],
-    )
-    assert res['window']['end'] <= holdout.start
-
-
-# ---------------------------------------------------------------------
 # runner.py param plumbing (the optimize -> full-backtest handoff)
 # ---------------------------------------------------------------------
 
@@ -544,45 +341,6 @@ def test_resolve_params_precedence(tmp_path):
     assert parse_param_value('mode=trend') == ('mode', 'trend')
     with pytest.raises(ValueError):
         parse_param_value('nope')
-
-
-# ---------------------------------------------------------------------
-# extract_events / purge_events
-# ---------------------------------------------------------------------
-
-def test_extract_events_matches_ledger_trade_count(market):
-    from strategies.double_ma import DoubleMaStrategy
-
-    params = {'fast_period': 3, 'slow_period': 8, 'lots': 1}
-    window = Window('full', 0, market.n_bars)
-    ext = extract_events(market, DoubleMaStrategy, params, window, cash=100_000.0, pad=0)
-    assert len(ext['events']) == len(ext['run']['result']['trade_logs'])
-    assert len(ext['events']) > 10  # the cyclical series should produce plenty of crossovers
-    for e in ext['events']:
-        assert e['signal_bar'] < e['open_bar']
-        assert e['weight'] == abs(e['net_pnl'])
-        assert e['label'] == (e['net_pnl'] > 0)
-
-
-def test_purge_events_removes_boundary_crossing_and_embargoed_events():
-    events = [
-        {'symbol': 'SA', 'signal_bar': 50, 'open_bar': 51, 'close_bar': 60, 'net_pnl': 10.0, 'label': True, 'weight': 10.0},   # fully inside train
-        {'symbol': 'SA', 'signal_bar': 90, 'open_bar': 91, 'close_bar': 150, 'net_pnl': 5.0, 'label': True, 'weight': 5.0},    # opens in train, closes inside valid -> purge
-        {'symbol': 'SA', 'signal_bar': 95, 'open_bar': 96, 'close_bar': 105, 'net_pnl': -3.0, 'label': False, 'weight': 3.0},  # holding interval reaches into embargo padding -> purge
-        {'symbol': 'SA', 'signal_bar': 120, 'open_bar': 121, 'close_bar': 130, 'net_pnl': 7.0, 'label': True, 'weight': 7.0},  # inside valid window
-    ]
-    train = Window('train', 0, 100)
-    valid = Window('valid', 110, 200)
-    train_events, valid_events = purge_events(events, train, valid, embargo=10)
-
-    assert valid_events == [events[3]]
-    train_bars = {e['signal_bar'] for e in train_events}
-    assert 50 in train_bars
-    assert 90 not in train_bars   # holding interval [91,150] overlaps embargoed valid region
-    assert 95 not in train_bars   # holding interval [96,105] overlaps [valid.start-embargo, ...) = [100, ...)
-    for e in train_events:
-        close_bar = e['close_bar']
-        assert not (e['open_bar'] < valid.end + 10 and close_bar >= valid.start - 10)
 
 
 # ---------------------------------------------------------------------
@@ -624,21 +382,3 @@ def test_optimize_run_study_never_touches_holdout_bars(market, tmp_path, monkeyp
     holdout_start = out['report']['holdout_window']['start']
     for w in seen_windows:
         assert w.end <= holdout_start, f"window {w} reaches into the holdout region"
-
-
-def test_fit_meta_model_end_to_end(market):
-    from strategies.double_ma import DoubleMaStrategy
-
-    params = {'fast_period': 3, 'slow_period': 8, 'lots': 1}
-    bundle = fit_meta_model(
-        market, DoubleMaStrategy, params, cash=100_000.0,
-        n_folds=3, embargo=5, holdout_frac=0.2, min_events_per_fold=5,
-        reserve_bars=20,  # skip the 252-bar z-score-driven default; this market is only 900 bars
-    )
-    assert 0.0 <= bundle['threshold'] <= 1.0
-    assert bundle['n_events_oof'] > 0
-    assert bundle['features']
-    # The deployed pipeline must have been fitted on exactly the feature set
-    # recorded alongside it -- anything else silently mis-orders columns at
-    # predict time.
-    assert bundle['pipeline'].n_features_in_ == len(bundle['features'])
