@@ -1,6 +1,13 @@
 """Calendar-spread roll: map trading dates to the executable CZCE contract.
 
-Calendar (calendar months, not delivery months):
+The calendar is derived from each product's registered ``main_months`` (see
+``datafeed.products.roll_rule``) rather than hard-coded: a contract is rolled
+out of on the **first calendar day of the month ``lead_months`` before its
+delivery month**, so the position always sits in the nearest main contract
+that has not yet reached its roll date.
+
+With the CZCE default -- main months (1, 5, 9), one month of lead -- that
+reproduces the usual schedule:
   Dec / Jan / Feb / Mar  ->  May contract (Dec uses next year's May)
   Apr / May / Jun / Jul  ->  September contract (same year)
   Aug / Sep / Oct / Nov  ->  next year's January contract
@@ -17,6 +24,12 @@ from typing import Dict, Hashable, Iterable, Optional, Tuple
 
 import pandas as pd
 
+from .products import (
+    DEFAULT_MAIN_MONTHS,
+    DEFAULT_ROLL_LEAD_MONTHS,
+    normalize_main_months,
+)
+
 logger = logging.getLogger(__name__)
 
 Expiry = Tuple[int, int]  # (year, month)
@@ -29,17 +42,42 @@ def normalize_contract_code(code) -> str:
     return str(code).strip().replace(' ', '')
 
 
-def target_expiry(dt) -> Expiry:
-    """Return the (year, month) of the contract that should be traded on ``dt``."""
-    ts = pd.Timestamp(dt)
-    year, month = int(ts.year), int(ts.month)
-    if month == 12:
-        return year + 1, 5
-    if month in (1, 2, 3):
-        return year, 5
-    if month in (4, 5, 6, 7):
-        return year, 9
-    return year + 1, 1
+def roll_date(expiry: Expiry, lead_months: int = DEFAULT_ROLL_LEAD_MONTHS):
+    """First calendar day of the month ``lead_months`` ahead of delivery.
+
+    This is the day the contract is rolled *out of*: with a one-month lead a
+    05 contract is dropped on April 1st, not held into the delivery month.
+    """
+    year, month = int(expiry[0]), int(expiry[1])
+    start = pd.Timestamp(year=year, month=month, day=1)
+    return start - pd.DateOffset(months=int(lead_months))
+
+
+def target_expiry(
+    dt,
+    main_months: Iterable[int] = DEFAULT_MAIN_MONTHS,
+    lead_months: int = DEFAULT_ROLL_LEAD_MONTHS,
+) -> Expiry:
+    """Return the (year, month) of the contract that should be traded on ``dt``.
+
+    The nearest main-month delivery whose roll date is still ahead of ``dt``.
+    Roll dates rise with the delivery month, so the first candidate that
+    clears ``dt`` is the closest one.
+    """
+    ts = pd.Timestamp(dt).normalize()
+    months = normalize_main_months(main_months)
+    lead = int(lead_months)
+    # A lead longer than a year pulls the roll date back whole years, so the
+    # scan has to start that far in the past to still find the nearest one.
+    first_year = int(ts.year) - lead // 12 - 1
+    for year in range(first_year, int(ts.year) + 3):
+        for month in months:
+            if roll_date((year, month), lead) > ts:
+                return year, month
+    raise ValueError(
+        f'No contract found for {ts.date()} with main_months={months} '
+        f'and lead_months={lead}'
+    )
 
 
 def parse_contract_expiry(code, asof) -> Optional[Expiry]:
@@ -136,6 +174,8 @@ def build_date_contract_map(
     contracts_df: pd.DataFrame,
     warn: bool = True,
     listed_from=None,
+    main_months: Iterable[int] = DEFAULT_MAIN_MONTHS,
+    lead_months: int = DEFAULT_ROLL_LEAD_MONTHS,
 ) -> Dict[Hashable, str]:
     """Map each trading date to the calendar contract feed name.
 
@@ -143,10 +183,16 @@ def build_date_contract_map(
     Expiry is parsed per row so 3-digit codes that wrap every decade
     (FG501 in 2015 vs 2025) resolve independently.
 
+    ``main_months`` / ``lead_months`` come from the product registry
+    (``datafeed.products.roll_rule``) and decide which delivery month is
+    active on each date.
+
     If the target contract has no row on that date, the date is left
     unmapped (not tradable). A warning is printed once per target expiry.
     Dates before ``listed_from`` (product listing) are skipped.
     """
+    months = normalize_main_months(main_months)
+    lead = int(lead_months)
     if contracts_df.empty:
         raise ValueError("contracts_df is empty; cannot build a roll calendar")
 
@@ -175,7 +221,7 @@ def build_date_contract_map(
     for dt in index:
         if listed is not None and dt < listed:
             continue
-        expiry = target_expiry(dt)
+        expiry = target_expiry(dt, months, lead)
         candidates = names_by_expiry.get(expiry, [])
 
         code = None

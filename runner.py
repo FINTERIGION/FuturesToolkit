@@ -2,7 +2,7 @@
 FuturesToolkit backtest runner.
 
 Usage (from the repo root):
-  python runner.py --symbols SA FG CF --start 2020-01-01 --end 2026-12-31 \
+  python runner.py --symbols SA FG CF MA TA SR OI --start 2020-01-01 --end 2026-12-31 \
       --strategy double_ma --cash 100000
 
 Run ``python runner.py --help`` for the full flag list.
@@ -123,8 +123,8 @@ def resolve_params(strategy_cls: type, args: argparse.Namespace) -> dict:
 
 def _parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='FuturesToolkit backtest runner.')
-    parser.add_argument('--symbols', nargs='+', default=['SA', 'FG', 'CF'],
-                         help=f'Products to load (default: SA FG CF; registered: {", ".join(list_products())})')
+    parser.add_argument('--symbols', nargs='+', default=['SA', 'FG', 'CF', 'MA', 'TA', 'SR', 'OI'],
+                         help=f'Products to load (default: all registered; registered: {", ".join(list_products())})')
     parser.add_argument('--start', default='2020-01-01', help="Backtest start date 'YYYY-MM-DD'")
     parser.add_argument('--end', default='2026-12-31', help="Backtest end date 'YYYY-MM-DD'")
     parser.add_argument('--cash', type=float, default=100_000.0, help='Initial cash (CNY)')
@@ -166,6 +166,18 @@ def _save_trade_log(trade_logs: list, results_dir: str, strategy_name: str) -> s
 
 def _print_summary(metrics: dict, log_path: str) -> None:
     sep = '=' * 50
+    if not metrics:
+        # Every field below would read 0.00 -- including `Initial Cash`, which
+        # the user demonstrably did set. Say what happened instead; the engine
+        # has already logged the specific reason just above this.
+        logger.warning('\n'.join([
+            sep, '  Backtest Result Summary', sep,
+            '  No bars were recorded, so every metric is undefined.',
+            '  See the engine warning above for the reason (most often the',
+            "  strategy's indicator warmup exceeds the loaded date range).",
+            f'  Trade Log           : {log_path}', sep,
+        ]))
+        return
     lines = [
         sep, '  Backtest Result Summary', sep,
         f"  Initial Cash        : {metrics.get('initial_cash', 0):>14,.2f} CNY",

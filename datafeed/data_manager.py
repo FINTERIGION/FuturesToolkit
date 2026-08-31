@@ -20,7 +20,7 @@ ROOT_DIR = os.path.dirname(DATAFEED_DIR)
 logger = logging.getLogger(__name__)
 
 from .data_update import DataUpdate
-from .products import require_products
+from .products import require_products, roll_rule
 from .roll_calendar import (
     annotate_expiries,
     build_date_contract_map,
@@ -48,7 +48,7 @@ class DataManager:
         Parameters
         ----------
         symbols : list[str], optional
-            Product codes to load, e.g. ``['SA', 'FG', 'CF']``.
+            Product codes to load, e.g. ``['SA', 'FG', 'CF', 'MA']``.
         symbol : str, optional
             Single-product alias used when ``symbols`` is omitted.
         update : bool
@@ -274,8 +274,13 @@ class DataManager:
         raw = annotate_expiries(self.load_contracts_dataframe(symbol))
         weighted_df = self._align_contract_ohlc(weighted_src, calendar)
 
+        rule = roll_rule(symbol)
         mapping = build_date_contract_map(
-            calendar, raw, listed_from=first_print
+            calendar,
+            raw,
+            listed_from=first_print,
+            main_months=rule['main_months'],
+            lead_months=rule['lead_months'],
         )
         calendar_codes = []
         seen_cal = set()
@@ -336,8 +341,11 @@ class DataManager:
         n_cal = len(calendar_codes)
         n_all = len(contract_frames)
         logger.info(
-            "%s feeds: weighted + %d contracts (%d calendar: %s)",
+            "%s feeds: weighted + %d contracts (%d calendar: %s); "
+            "main months %s, rolled %d month(s) before delivery",
             symbol, n_all, n_cal, ', '.join(calendar_codes),
+            '/'.join(f'{m:02d}' for m in rule['main_months']),
+            rule['lead_months'],
         )
 
         return {

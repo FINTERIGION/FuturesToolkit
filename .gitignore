@@ -21,3 +21,4 @@ strategies/*
 !strategies/double_ma.py
 !strategies/rsi_mean_reversion.py
 !strategies/my_strategy.py
+!strategies/cross_sectional_momentum.py

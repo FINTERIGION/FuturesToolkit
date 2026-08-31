@@ -12,6 +12,7 @@ import pkgutil
 import re
 
 from .base import BarContext, SetupContext, Strategy
+from .cross_sectional_momentum import CrossSectionalMomentumStrategy
 from .double_ma import DoubleMaStrategy
 from .my_strategy import MyStrategy
 from .rsi_mean_reversion import RsiMeanReversionStrategy
@@ -19,6 +20,7 @@ from .rsi_mean_reversion import RsiMeanReversionStrategy
 __all__ = [
     'Strategy', 'SetupContext', 'BarContext',
     'DoubleMaStrategy', 'RsiMeanReversionStrategy', 'MyStrategy',
+    'CrossSectionalMomentumStrategy',
     'discover_strategies', 'load_strategy', 'name_for',
 ]
 

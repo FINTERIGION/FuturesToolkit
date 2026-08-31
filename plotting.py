@@ -245,7 +245,7 @@ class BacktestPlotter:
     def _plot_position(self) -> str:
         symbols = self.symbols or ['position']
         n = len(symbols)
-        fig, axes = plt.subplots(n, 1, figsize=(12, 3 * n), sharex=True, squeeze=False)
+        fig, axes = plt.subplots(n, 1, figsize=(12, min(3 * n, 18)), sharex=True, squeeze=False)
         axes = axes[:, 0]
 
         for ax, symbol in zip(axes, symbols):
@@ -294,7 +294,7 @@ class BacktestPlotter:
     def _plot_price_signals(self) -> str:
         symbols = self.symbols or list(self.price_dfs.keys())
         n = len(symbols) or 1
-        fig, axes = plt.subplots(n, 1, figsize=(14, 4 * n), sharex=True, squeeze=False)
+        fig, axes = plt.subplots(n, 1, figsize=(14, min(4 * n, 24)), sharex=True, squeeze=False)
         axes = axes[:, 0]
 
         has_exec = any(

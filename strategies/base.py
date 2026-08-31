@@ -9,6 +9,7 @@ an order lands on.
 
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 import numpy as np
@@ -22,6 +23,8 @@ from core.types import Bar
 __all__ = [
     'Strategy', 'SetupContext', 'BarContext', 'Int', 'Float', 'Categorical', 'Spec',
 ]
+
+logger = logging.getLogger(__name__)
 
 
 class Strategy:
@@ -198,12 +201,30 @@ class BarContext:
     # ------------------------------------------------------------------
 
     def size_for_risk(self, sym: str, stop_distance: float, risk_pct: float) -> int:
-        """Lots such that a full stop-out risks ``risk_pct`` of current equity."""
+        """Lots such that a full stop-out risks ``risk_pct`` of current equity.
+
+        Returns 0 -- silently, as far as trading goes -- whenever the budget
+        does not stretch to a single lot. That is the correct sizing answer
+        (opening one anyway would spend more risk than ``risk_pct``
+        authorized), but it is indistinguishable from "no signal" in the
+        results, so each zero is traced at DEBUG. DEBUG rather than WARNING
+        because this is called per bar per symbol: run with ``--verbose`` when
+        a strategy trades less than expected.
+        """
         if stop_distance <= 0:
+            logger.debug('%s: stop_distance=%s is not positive; 0 lots', sym, stop_distance)
             return 0
         multiplier = product_costs(sym)['multiplier']
         per_lot_risk = stop_distance * multiplier
         if per_lot_risk <= 0:
+            logger.debug('%s: per-lot risk=%s is not positive; 0 lots', sym, per_lot_risk)
             return 0
         risk_amount = self.equity * risk_pct
-        return int(risk_amount // per_lot_risk)
+        lots = int(risk_amount // per_lot_risk)
+        if lots == 0:
+            logger.debug(
+                '%s: risk budget %.2f is under one lot (stop %.4f x multiplier %s '
+                '= %.2f per lot); 0 lots',
+                sym, risk_amount, stop_distance, multiplier, per_lot_risk,
+            )
+        return lots

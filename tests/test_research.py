@@ -341,6 +341,13 @@ def test_meta_filtered_strategy_threshold_above_one_blocks_all_entries(market, n
     window = Window('full', 0, market.n_bars)
     proba = {'SA': np.full(market.n_bars, 0.5)}
 
+    # A cross-sectional strategy needs more than one product to define a
+    # cross-section at all, so it never opens a position on this
+    # single-product ``market`` fixture -- nothing for the gate to reject.
+    baseline = run_window(market, cls, params, window, cash=100_000.0, pad=0)
+    if not baseline['result']['trade_logs']:
+        pytest.skip(f'{name} never opens a position on this single-product market')
+
     def factory(**_ignored):
         return MetaFilteredStrategy(cls(**params), proba, meta_threshold=1.1)
 

@@ -10,6 +10,7 @@ the old backtrader strategy base had to.
 
 from __future__ import annotations
 
+import logging
 from datetime import date as Date
 from typing import Callable, Dict, List, Optional
 
@@ -20,6 +21,8 @@ from .broker import Broker
 from .ledger import Ledger
 from .market import MarketData
 from .types import Reason
+
+logger = logging.getLogger(__name__)
 
 
 def _to_date(np_date) -> Date:
@@ -315,6 +318,8 @@ class Engine:
             last_date = _to_date(self.market.dates[-1])
             self.ledger.finish(self.broker, last_date, last_bar=self.market.n_bars - 1)
 
+        self._report_unfinished()
+
         on_finish = getattr(self.strategy, 'on_finish', None)
         if callable(on_finish):
             on_finish(self)
@@ -326,4 +331,35 @@ class Engine:
             'broker': self.broker,
             'ledger': self.ledger,
             'liquidation_count': self.broker.liquidation_count,
+            'deferred': {sym: amt for sym, amt in self.deferred.items() if amt},
         }
+
+    def _report_unfinished(self) -> None:
+        """Warn about the two ways a run can end with nothing to show for
+        itself that neither the metrics nor the trade log can explain.
+
+        Both are facts only the engine holds -- a strategy cannot see either
+        one -- and both otherwise surface as a silent zero-trade result, which
+        reads like "the signal never fired" when the truth is "the run never
+        gave it the chance to". ``compute_metrics`` returns ``{}`` for the
+        first case, so without this the CLI prints a table of zeros whose
+        ``Initial Cash: 0.00`` sends the reader after ``--cash`` instead of
+        after the lookback that actually caused it.
+        """
+        n_bars = self.market.n_bars
+        if self.record_start >= n_bars:
+            logger.warning(
+                "No bar was traded or recorded: indicators need %d warmup bars "
+                "but the market has only %d. Every metric will be empty. "
+                "Shorten the strategy's lookback, or widen the date range.",
+                self.record_start, n_bars,
+            )
+
+        leftover = {sym: amt for sym, amt in self.deferred.items() if amt}
+        if leftover:
+            logger.warning(
+                "Run ended with order(s) still deferred and never filled: %s. "
+                "Each product had no tradable session after its signal fired -- "
+                "these lots are absent from both the trade log and the equity curve.",
+                leftover,
+            )
