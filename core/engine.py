@@ -53,14 +53,19 @@ class Engine:
         self.live_stop: Dict[str, dict] = {}    # {'price', 'contract'} currently resting
 
         self.indicators: Dict[tuple, "object"] = {}
-        # ``add_indicator`` (called from ``strategy.setup``) only ever raises
-        # this -- it never lowers it -- so a caller-supplied floor (used by
-        # research/runner_api.py to hide a leading pad window from both
-        # trading and the equity curve) survives indicator registration.
-        self.warmup_index = int(warmup_bars)
+        # Warmup is tracked per product, not once for the whole universe: a
+        # product listed late (or simply missing early history) must not hold
+        # the rest of the universe out of the market. ``require_warmup`` only
+        # ever raises a symbol's entry, never lowers it, so the caller-supplied
+        # floor -- used by research/runner_api.py to hide a leading pad window
+        # from both trading and the equity curve -- survives registration.
+        self._warmup_floor = int(warmup_bars)
+        self.warmup_by_symbol: Dict[str, int] = {
+            sym: self._warmup_floor for sym in self.symbols
+        }
         # Floor on ``record_start``, kept separate from ``warmup_index`` only
-        # so that code assigning to the latter directly can never make the
-        # equity curve start *earlier* than the caller asked for.
+        # so that indicator registration can never make the equity curve start
+        # *earlier* than the caller asked for.
         self._record_from = int(warmup_bars)
 
         self.equity_records: List[dict] = []
@@ -68,12 +73,50 @@ class Engine:
         self._prev_equity = initial_cash
 
     @property
+    def warmup_index(self) -> int:
+        """First bar on which *any* product can trade.
+
+        This gates the signal phase as a whole: there is no point calling
+        ``on_bar`` before the earliest-warming product is ready, but waiting
+        for the slowest one would throw away every other product's history.
+        Per-product readiness is enforced separately, in ``warmup_by_symbol``.
+        """
+        if not self.warmup_by_symbol:
+            return self._warmup_floor
+        return min(self.warmup_by_symbol.values())
+
+    @property
+    def warmup_full(self) -> int:
+        """First bar on which *every* product can trade.
+
+        This is the pad a caller needs if it wants the whole universe live from
+        the first bar of a window -- see ``research.warmup.probe_warmup``.
+        """
+        if not self.warmup_by_symbol:
+            return self._warmup_floor
+        return max(self.warmup_by_symbol.values())
+
+    def require_warmup(self, sym: str, first_valid: int) -> int:
+        """Hold ``sym`` out of the market until bar ``first_valid``.
+
+        Monotonic on purpose -- it raises a product's warmup and never lowers
+        it -- so indicators registered in any order settle on the strictest
+        one, and the caller-supplied floor is never undercut. A symbol the
+        market does not carry starts from that same floor rather than from
+        zero. This is the only supported way to move ``warmup_by_symbol``.
+        """
+        current = self.warmup_by_symbol.get(sym, self._warmup_floor)
+        bar = max(current, int(first_valid))
+        self.warmup_by_symbol[sym] = bar
+        return bar
+
+    @property
     def record_start(self) -> int:
         """First bar that appears in ``equity_records``.
 
-        Never earlier than ``warmup_index``, which ``add_indicator`` raises
-        past the caller's floor whenever the registered indicators need more
-        history than the supplied ``warmup_bars`` covers. Bars in
+        Never earlier than ``warmup_index``, which indicator registration
+        raises past the caller's floor whenever the registered indicators need
+        more history than the supplied ``warmup_bars`` covers. Bars in
         ``[warmup_bars, warmup_index)`` are ones ``_signal_phase`` skips
         entirely, so recording them would prepend a run of flat, zero-return
         bars that no decision of the strategy's produced -- deflating the
@@ -264,7 +307,10 @@ class Engine:
             ctx = bar_context_cls(self, i, date)
             self.strategy.on_bar(ctx)
         for sym, delta in self.queued.items():
-            if delta:
+            # ``ctx.can_trade`` already reports a still-warming product as
+            # untradable, but a strategy is free not to ask; dropping the order
+            # here makes per-product warmup hold whatever the strategy does.
+            if delta and i >= self.warmup_by_symbol.get(sym, 0):
                 self.pending[sym] = self.pending.get(sym, 0) + delta
 
     # ------------------------------------------------------------------

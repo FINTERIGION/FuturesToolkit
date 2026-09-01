@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "futurestoolkit"
 version = "0.1.0"
-description = "Self-built daily futures backtesting engine for CZCE products."
+description = "Self-built daily futures backtesting engine for Chinese commodity futures (CZCE, SHFE, DCE)."
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.11"

@@ -1,4 +1,7 @@
-"""Registered CZCE products and symbol helpers.
+"""Registered products (CZCE, SHFE, DCE) and symbol helpers.
+
+``exchange`` selects the download adapter in ``datafeed.sources``; every other
+key here is venue-agnostic.
 
 Commission is per product, one of:
   commission_rate      fraction of notional (price × lots × multiplier)
@@ -10,8 +13,19 @@ Rolling is per product too:
   roll_lead_months     how far ahead of delivery to roll out (default 1)
 A contract is rolled out of on the first calendar day of the month
 ``roll_lead_months`` before its delivery month -- the 05 contract is dropped
-on April 1st. Both keys are optional; omitting them uses the CZCE defaults
-below, so a new product only needs an entry when its main months differ.
+on April 1st. Both keys are optional; omitting them uses the module defaults
+below, so a product only needs to declare them when its cycle differs -- as
+SHFE rebar (01/05/10) and bitumen (06/09/12) do.
+
+Contract codes are normalised to UPPERCASE + 4-digit YYMM regardless of venue
+(``RB2601``, ``C2601``), which is what ``parse_product`` and
+``roll_calendar.parse_contract_expiry`` expect.
+
+The numbers below are a starting point, not a live feed: exchanges revise
+multipliers, margin floors, and fee schedules by notice, and a broker's margin
+sits above the exchange floor by an amount only your own account statement
+knows. Calibrate them yourself before trusting a backtest's cost model -- the
+tests here check only that each entry is well formed, never what it says.
 """
 
 from __future__ import annotations
@@ -23,8 +37,11 @@ _CONTRACT_RE = re.compile(r'^([A-Za-z]+)(\d+)$')
 _CONTRACT_DECADE_RE = re.compile(r'^([A-Za-z]+)(\d+)_(\d{6})$')
 _WEIGHTED_SUFFIX = '_weighted'
 
-# CZCE chemicals/softs concentrate liquidity in the 01/05/09 contracts, and
-# the standing convention is to leave a contract one month before delivery.
+# The 01/05/09 cycle is the most common one across these venues -- every CZCE
+# product here plus DCE corn, coking coal, and PVC -- so it is the fallback for
+# a product that declares nothing. The standing convention is to leave a
+# contract one month before delivery. Neither is universal; see the entries
+# below that override them.
 DEFAULT_MAIN_MONTHS = (1, 5, 9)
 DEFAULT_ROLL_LEAD_MONTHS = 1
 
@@ -36,7 +53,7 @@ PRODUCTS: Dict[str, dict] = {
         'start_year': 2019,
         'main_months': (1, 5, 9),
         'multiplier': 20,
-        'margin_rate': 0.12,
+        'margin_rate': 0.11,
         'commission_rate': 0.0001,
     },
     'FG': {
@@ -46,7 +63,7 @@ PRODUCTS: Dict[str, dict] = {
         'start_year': 2015,
         'main_months': (1, 5, 9),
         'multiplier': 20,
-        'margin_rate': 0.13,
+        'margin_rate': 0.12,
         'commission_per_lot': 2.0,
     },
     'CF': {
@@ -56,48 +73,68 @@ PRODUCTS: Dict[str, dict] = {
         'start_year': 2015,
         'main_months': (1, 5, 9),
         'multiplier': 5,
-        'margin_rate': 0.11,
+        'margin_rate': 0.10,
         'commission_per_lot': 4.3,
     },
-    'MA': {
-        'exchange': 'CZCE',
-        'name': 'methanol',
-        'name_zh': '甲醇',
+    'BU': {
+        'exchange': 'SHFE',
+        'name': 'bitumen',
+        'name_zh': '沥青',
+        'start_year': 2015,
+        'main_months': (6, 9, 12),
+        'multiplier': 10,
+        'margin_rate': 0.16,
+        'commission_rate': 0.00005,
+    },
+    'RB': {
+        'exchange': 'SHFE',
+        'name': 'rebar',
+        'name_zh': '螺纹钢',
+        'start_year': 2015,
+        'main_months': (1, 5, 10),
+        'multiplier': 10,
+        'margin_rate': 0.10,
+        'commission_rate': 0.0001,
+    },
+    'HC': {
+        'exchange': 'SHFE',
+        'name': 'hot_rolled_coil',
+        'name_zh': '热卷',
+        'start_year': 2015,
+        'main_months': (1, 5, 10),
+        'multiplier': 10,
+        'margin_rate': 0.10,
+        'commission_rate': 0.0001,
+    },
+    'C': {
+        'exchange': 'DCE',
+        'name': 'corn',
+        'name_zh': '玉米',
         'start_year': 2015,
         'main_months': (1, 5, 9),
         'multiplier': 10,
         'margin_rate': 0.11,
+        'commission_per_lot': 1.2,
+    },
+    'JM': {
+        'exchange': 'DCE',
+        'name': 'coking_coal',
+        'name_zh': '焦煤',
+        'start_year': 2015,
+        'main_months': (1, 5, 9),
+        'multiplier': 60,
+        'margin_rate': 0.17,
         'commission_rate': 0.0001,
     },
-    'TA': {
-        'exchange': 'CZCE',
-        'name': 'pta',
-        'name_zh': 'PTA',
+    'V': {
+        'exchange': 'DCE',
+        'name': 'pvc',
+        'name_zh': 'PVC',
         'start_year': 2015,
         'main_months': (1, 5, 9),
         'multiplier': 5,
-        'margin_rate': 0.11,
-        'commission_per_lot': 3.0,
-    },
-    'SR': {
-        'exchange': 'CZCE',
-        'name': 'white_sugar',
-        'name_zh': '白糖',
-        'start_year': 2015,
-        'main_months': (1, 5, 9),
-        'multiplier': 10,
-        'margin_rate': 0.10,
-        'commission_per_lot': 3.0,
-    },
-    'OI': {
-        'exchange': 'CZCE',
-        'name': 'rapeseed_oil',
-        'name_zh': '菜油',
-        'start_year': 2015,
-        'main_months': (1, 5, 9),
-        'multiplier': 10,
-        'margin_rate': 0.11,
-        'commission_per_lot': 2.0,
+        'margin_rate': 0.14,
+        'commission_per_lot': 1.0,
     },
 }
 

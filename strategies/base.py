@@ -100,12 +100,17 @@ class SetupContext:
         return guard(self._weighted(sym, 'oi'), name=f'{sym}.oi')
 
     def add_indicator(self, name: str, sym: str, array) -> None:
-        """Register a precomputed full-series indicator. The engine skips
-        ``on_bar`` until every registered indicator has a valid value."""
+        """Register a precomputed full-series indicator.
+
+        Warmup is per product: this pushes out the bar from which ``sym``
+        becomes tradable, and leaves every other product alone. A product whose
+        history starts late therefore sits out until its own indicators are
+        valid, while the rest of the universe trades from their own first
+        valid bar.
+        """
         arr = guard(np.asarray(array, dtype='float64'), name=f'indicator {name}/{sym}')
         self._engine.indicators[(name, sym)] = arr
-        first_valid = _first_valid_index(arr)
-        self._engine.warmup_index = max(self._engine.warmup_index, first_valid)
+        self._engine.require_warmup(sym, _first_valid_index(arr))
 
 
 class BarContext:
@@ -137,6 +142,9 @@ class BarContext:
         return self._engine.broker.net_position(sym)
 
     def can_trade(self, sym: str) -> bool:
+        """True when ``sym`` has a session today *and* its own warmup is done."""
+        if self.i < self._engine.warmup_by_symbol.get(sym, 0):
+            return False
         return self._engine.market.products[sym].can_trade(self.i)
 
     def contract(self, sym: str) -> str:

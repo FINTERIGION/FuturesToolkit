@@ -1,19 +1,23 @@
-"""Calendar-spread roll: map trading dates to the executable CZCE contract.
+"""Calendar-spread roll: map trading dates to the executable contract.
 
-The calendar is derived from each product's registered ``main_months`` (see
-``datafeed.products.roll_rule``) rather than hard-coded: a contract is rolled
-out of on the **first calendar day of the month ``lead_months`` before its
-delivery month**, so the position always sits in the nearest main contract
-that has not yet reached its roll date.
+Venue-agnostic. The calendar is derived from each product's registered
+``main_months`` (see ``datafeed.products.roll_rule``) rather than hard-coded:
+a contract is rolled out of on the **first calendar day of the month
+``lead_months`` before its delivery month**, so the position always sits in
+the nearest main contract that has not yet reached its roll date.
 
-With the CZCE default -- main months (1, 5, 9), one month of lead -- that
+With the registry default -- main months (1, 5, 9), one month of lead -- that
 reproduces the usual schedule:
   Dec / Jan / Feb / Mar  ->  May contract (Dec uses next year's May)
   Apr / May / Jun / Jul  ->  September contract (same year)
   Aug / Sep / Oct / Nov  ->  next year's January contract
 
-Contract codes are resolved from ``data/{symbol}.csv`` (CZCE 3-digit YMM or
-4-digit YYMM suffixes such as SA509 / FG2505), not constructed by hand.
+A product off that cycle just declares its own months; nothing here changes.
+
+Contract codes are resolved from ``data/{symbol}.csv``, not constructed by
+hand. Both suffix forms are accepted: 4-digit YYMM, which SHFE and DCE always
+use and CZCE uses in its files (RB2601 / C2601 / FG2505), and the 3-digit YMM
+short form CZCE prints on its own site (SA509).
 """
 
 from __future__ import annotations
@@ -38,7 +42,7 @@ _CONTRACT_RE = re.compile(r'^[A-Za-z]+(\d+)$')
 
 
 def normalize_contract_code(code) -> str:
-    """Strip whitespace so CZCE codes match feed names."""
+    """Strip whitespace so exchange codes match feed names."""
     return str(code).strip().replace(' ', '')
 
 
@@ -81,11 +85,11 @@ def target_expiry(
 
 
 def parse_contract_expiry(code, asof) -> Optional[Expiry]:
-    """Parse a CZCE contract code into (expiry_year, expiry_month).
+    """Parse a contract code into (expiry_year, expiry_month).
 
-    4-digit suffixes are YYMM (SA2505 -> 2025-05).
-    3-digit suffixes are YMM (SA509 -> year ending in 5, month 09),
-    disambiguated with ``asof`` so the expiry is not already past.
+    4-digit suffixes are YYMM (SA2505, RB2601, C2601 -> 2025-05 / 2026-01).
+    3-digit suffixes are the CZCE short form, YMM (SA509 -> year ending in 5,
+    month 09), disambiguated with ``asof`` so the expiry is not already past.
     """
     code = normalize_contract_code(code)
     match = _CONTRACT_RE.match(code)
@@ -136,7 +140,8 @@ def infer_code_expiry(code: str, sample_dates: Iterable) -> Optional[Expiry]:
 def annotate_expiries(contracts_df: pd.DataFrame) -> pd.DataFrame:
     """Add an ``expiry`` column parsed with each row's own date as ``asof``.
 
-    CZCE 3-digit codes wrap every 10 years (FG501 is 2015-01 and 2025-01).
+    The CZCE 3-digit short form wraps every 10 years (FG501 is both 2015-01
+    and 2025-01); 4-digit codes do not, so this only bites on CZCE.
     Expiry must be parsed per print date, not from the code's first-ever bar.
     """
     df = contracts_df.copy()
@@ -162,7 +167,7 @@ def colliding_codes(df: pd.DataFrame, start, end) -> set:
 
 
 def contract_feed_name(code: str, expiry: Expiry, colliding: set) -> str:
-    """Unique feed name; suffix YYYYMM when the 3-digit code is reused."""
+    """Unique feed name; suffix YYYYMM when a 3-digit CZCE code is reused."""
     if code in colliding:
         year, month = expiry
         return f'{code}_{year}{month:02d}'

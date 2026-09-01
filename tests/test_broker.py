@@ -3,8 +3,10 @@ import datetime
 import pytest
 
 from core.broker import Broker
+from datafeed.products import product_costs
 
 D = datetime.date(2024, 1, 1)
+FG = product_costs('FG')
 
 
 def test_realized_pnl_on_full_close_long():
@@ -49,7 +51,10 @@ def test_mark_to_market_includes_unrealized_and_margin():
     eq, margin_used, available = b.mark_to_market(lambda s, c: 105.0)
     expected_equity = 100_000.0 - f.commission + (105 - 100) * 1 * 20
     assert eq == pytest.approx(expected_equity)
-    assert margin_used == pytest.approx(1 * 105 * 20 * 0.13)   # FG margin_rate=0.13
+    # the registry owns the rate; this asserts the broker's arithmetic on it
+    assert margin_used == pytest.approx(
+        1 * 105 * FG['multiplier'] * FG['margin_rate']
+    )
     assert available == pytest.approx(eq - margin_used)
 
 

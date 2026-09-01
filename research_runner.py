@@ -102,7 +102,8 @@ def cmd_holdout(args) -> None:
 # argparse wiring
 # ---------------------------------------------------------------------
 
-def _add_data_args(p, default_symbols=('SA', 'FG', 'CF', 'MA', 'TA', 'SR', 'OI')):
+def _add_data_args(p, default_symbols=('SA', 'FG', 'CF', 'BU', 'RB', 'HC',
+                                       'C', 'JM', 'V')):
     p.add_argument('--symbols', nargs='+', default=list(default_symbols),
                     help=f'Products to load (registered: {", ".join(list_products())})')
     p.add_argument('--start', default='2020-01-01')

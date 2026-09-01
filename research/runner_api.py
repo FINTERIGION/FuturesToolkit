@@ -86,7 +86,7 @@ def run_window(
         logger.warning(
             "%s on %s: indicators need %d warmup bars but pad covers only %d "
             "(bars %d-%d) -- evaluation start slipped from %d to %d.",
-            strategy_cls.__name__, window.name, engine.warmup_index, pad,
+            strategy_cls.__name__, window.name, engine.warmup_full, pad,
             lo, window.start, window.start, effective_start,
         )
 

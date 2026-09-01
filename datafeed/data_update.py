@@ -1,28 +1,29 @@
 """
-CZCE futures history download and OI-weighted aggregation.
+Futures history download and OI-weighted aggregation.
+
+Downloading and caching are per-exchange and live in ``datafeed.sources``; this
+module owns what is the same everywhere -- OI weighting, atomic CSV writes, and
+the freshness bookkeeping that lets a re-run skip a needless rebuild.
 
 Usage (from the repo root):
   python -m datafeed.data_update              # incremental: all registered products
   python -m datafeed.data_update FG CF        # selected products only
-  python -m datafeed.data_update --force      # re-download every year
+  python -m datafeed.data_update --force      # re-download everything
   python -m datafeed.data_update --rebuild-only
 """
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import logging
 import os
-import time
-import urllib.error
-import urllib.request
 from datetime import datetime
 
 import pandas as pd
 
 from .products import get_product, list_products, normalize_symbol, require_products
+from .sources import get_source
 
 logger = logging.getLogger(__name__)
 
@@ -30,166 +31,36 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CACHE_DIR = os.path.join(ROOT_DIR, 'cache')
 DATA_DIR = os.path.join(ROOT_DIR, 'data')
 
-_HEADER_MAP = {
-    '交易日期': 'date',
-    '合约代码': 'contract',
-    '品种代码': 'contract',
-    '昨结算': 'prev_settle',
-    '今开盘': 'open',
-    '最高价': 'high',
-    '最低价': 'low',
-    '今收盘': 'close',
-    '今结算': 'settle',
-    '涨跌1': 'change1',
-    '涨跌2': 'change2',
-    '成交量(手)': 'volume',
-    '持仓量': 'oi',
-    '空盘量': 'oi',
-    '增减量': 'oi_change',
-    '成交额(万元)': 'turnover',
-    '交割结算价': 'delivery_settle',
-}
-
-_REQUIRED_COLUMNS = [
-    'date', 'contract', 'open', 'high', 'low', 'close', 'oi', 'volume', 'settle',
-]
-_NUMERIC_COLUMNS = [
-    'prev_settle', 'open', 'high', 'low', 'close', 'settle',
-    'change1', 'change2', 'volume', 'oi', 'oi_change', 'turnover', 'delivery_settle',
-]
 _WEIGHTED_PRICE_COLS = ['open', 'high', 'low', 'close', 'settle']
-
-_HTTP_HEADERS = {
-    'User-Agent': (
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-        'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    ),
-    'Referer': 'https://www.czce.com.cn/',
-}
-_TIMEOUT = 45
-_RETRIES = 3
-
-
-def _czce_url(symbol: str, year: int) -> str:
-    base = f'https://www.czce.com.cn/cn/DFSStaticFiles/Future/{year}/FutureDataAllHistory'
-    if year < 2020:
-        return f'{base}/{symbol}.txt'
-    return f'{base}/{symbol}FUTURES{year}.txt'
-
-
-def _file_sha256(path: str) -> str:
-    digest = hashlib.sha256()
-    with open(path, 'rb') as fh:
-        for chunk in iter(lambda: fh.read(1 << 20), b''):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _detect_encoding(raw: bytes) -> str:
-    for encoding in ('utf-8-sig', 'gb18030', 'gbk'):
-        try:
-            raw.decode(encoding)
-            return encoding
-        except UnicodeDecodeError:
-            continue
-    return 'utf-8'
-
-
-def _normalize_columns(columns) -> list:
-    mapped = []
-    seen = {}
-    for col in columns:
-        key = str(col).replace('﻿', '').strip().replace(' ', '')
-        name = _HEADER_MAP.get(key, key)
-        if name in seen:
-            name = f'{name}_{seen[name]}'
-        seen[name] = seen.get(name, 0) + 1
-        mapped.append(name)
-    return mapped
-
-
-def _read_czce_history(path: str) -> pd.DataFrame:
-    with open(path, 'rb') as fh:
-        raw = fh.read()
-    if not raw.strip():
-        raise ValueError(f'Empty file: {path}')
-
-    text = raw.decode(_detect_encoding(raw), errors='replace')
-    lines = text.splitlines()
-    header_idx = next(
-        (i for i, line in enumerate(lines[:12]) if '交易日期' in line and '|' in line),
-        None,
-    )
-    if header_idx is None:
-        raise ValueError(f'No CZCE header found in {path}')
-
-    body = []
-    for line in lines[header_idx:]:
-        stripped = line.strip().rstrip('|').strip()
-        if stripped:
-            body.append(stripped)
-    if len(body) < 2:
-        raise ValueError(f'No rows parsed from {path}')
-
-    headers = [h.strip() for h in body[0].split('|')]
-    while headers and headers[-1] == '':
-        headers.pop()
-    n_cols = len(headers)
-    rows = []
-    for line in body[1:]:
-        parts = [p.strip() for p in line.split('|')]
-        while parts and parts[-1] == '':
-            parts.pop()
-        if len(parts) < 2:
-            continue
-        if len(parts) < n_cols:
-            parts.extend([''] * (n_cols - len(parts)))
-        rows.append(parts[:n_cols])
-
-    df = pd.DataFrame(rows, columns=headers, dtype=str)
-    df.columns = _normalize_columns(df.columns)
-    df = df.loc[:, ~df.columns.str.match(r'^(Unnamed|$)')]
-    df = df.dropna(how='all')
-    if df.empty:
-        raise ValueError(f'No rows parsed from {path}')
-    return df
-
-
-def _clean_contract_bars(df: pd.DataFrame) -> pd.DataFrame:
-    missing = [c for c in _REQUIRED_COLUMNS if c not in df.columns]
-    if missing:
-        raise KeyError(f'Missing required columns: {missing}')
-
-    out = df.copy()
-    object_cols = out.select_dtypes(include=['object', 'string']).columns
-    for col in object_cols:
-        out[col] = out[col].str.strip()
-
-    for col in _NUMERIC_COLUMNS:
-        if col not in out.columns:
-            continue
-        series = (
-            out[col]
-            .astype(str)
-            .str.replace(',', '', regex=False)
-            .str.strip()
-            .replace({'': pd.NA, 'nan': pd.NA, 'None': pd.NA, '-': pd.NA})
-        )
-        out[col] = pd.to_numeric(series, errors='coerce')
-
-    out['date'] = pd.to_datetime(out['date'], errors='coerce')
-    out['contract'] = out['contract'].astype(str).str.replace(' ', '', regex=False)
-    out = out.dropna(subset=['date', 'contract'])
-    out = out[~out['contract'].str.lower().isin(['', 'nan', 'none'])]
-    out = out.drop_duplicates(subset=['date', 'contract'], keep='last')
-    out = out.sort_values(['date', 'contract']).reset_index(drop=True)
-    return out[_REQUIRED_COLUMNS]
 
 
 def _build_weighted(df: pd.DataFrame) -> pd.DataFrame:
+    """OI-weight every contract's bar into one daily series per product.
+
+    A contract row only contributes if *all five* prices are real. Expiring
+    contracts routinely print ``open = high = low = 0`` on a day they still
+    carry open interest and a trade or two, and every exchange here does it.
+    Weighting those in drags the day's open/high/low toward zero while its
+    close stays honest, which produced OHLC bars that contradicted themselves
+    (``close > high``) -- and silently understated ATR and any high/low stop
+    built on them.
+
+    Dropping the whole row rather than masking per column is deliberate: it
+    keeps all five prices weighted by the same open interest, so the day's
+    bar stays internally consistent. The rows lost this way are tail-end
+    contracts whose OI share is a fraction of a percent.
+    """
     need = _WEIGHTED_PRICE_COLS + ['oi', 'volume']
     work = df.dropna(subset=need)
-    work = work[(work['oi'] > 0) & (work['volume'] > 0)].copy()
+    live = (work['oi'] > 0) & (work['volume'] > 0)
+    priced = (work[_WEIGHTED_PRICE_COLS] > 0).all(axis=1)
+    dropped = int((live & ~priced).sum())
+    if dropped:
+        logger.info(
+            'dropped %d traded contract-day row(s) with a non-positive price '
+            'from the OI-weighted series.', dropped,
+        )
+    work = work[live & priced].copy()
     if work.empty:
         raise ValueError('No rows left to build the OI-weighted series')
 
@@ -214,131 +85,76 @@ def _to_csv_atomic(df: pd.DataFrame, path: str) -> None:
     os.replace(tmp_path, path)
 
 
-def _http_download(url: str, dest: str) -> None:
-    request = urllib.request.Request(url, headers=_HTTP_HEADERS)
-    tmp_path = f'{dest}.tmp'
-    last_error = None
-    for attempt in range(1, _RETRIES + 1):
-        try:
-            with urllib.request.urlopen(request, timeout=_TIMEOUT) as resp:
-                payload = resp.read()
-            if not payload or len(payload) < 64:
-                raise ValueError(f'Empty response from {url}')
-            os.makedirs(os.path.dirname(dest), exist_ok=True)
-            with open(tmp_path, 'wb') as fh:
-                fh.write(payload)
-            os.replace(tmp_path, dest)
-            return
-        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError) as exc:
-            last_error = exc
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-            if isinstance(exc, urllib.error.HTTPError) and exc.code in (400, 403, 404):
-                break
-            if attempt < _RETRIES:
-                time.sleep(1.5 ** attempt)
-    raise last_error
-
-
 class DataUpdate:
     def __init__(self, category: str, data_dir: str = None, cache_dir: str = None):
         meta = get_product(category)
         self.category = normalize_symbol(category)
         self.exchange = meta['exchange']
         self.start_year = meta['start_year']
-        self.year = datetime.now().year
         self.data_dir = data_dir or DATA_DIR
         self.cache_dir = cache_dir or CACHE_DIR
         self.raw_path = os.path.join(self.data_dir, f'{self.category}.csv')
         self.weighted_path = os.path.join(self.data_dir, f'{self.category}_weighted.csv')
         self._meta_path = os.path.join(self.cache_dir, f'{self.category}.meta.json')
-
-    def years(self) -> range:
-        return range(self.start_year, self.year + 1)
-
-    def cache_path(self, year: int) -> str:
-        return os.path.join(self.cache_dir, f'{self.category}{year}.txt')
+        self.source = get_source(self.category, meta, self.cache_dir)
+        # Cache units the exchange would not hand over on the last ``update``.
+        # Empty means the CSVs are as current as the venue is.
+        self.stale_keys: list = []
 
     def update(self, force: bool = False, rebuild_only: bool = False) -> pd.DataFrame:
-        """Download CZCE history (incrementally) and rebuild contract / weighted CSVs."""
-        if self.exchange != 'CZCE':
-            raise NotImplementedError(f'Exchange {self.exchange} is not supported')
+        """Sync the exchange cache (incrementally) and rebuild contract / weighted CSVs.
 
+        A download that fails is not fatal -- the existing cache still builds a
+        usable series -- but it leaves the result behind the exchange, so the
+        keys involved are recorded in ``stale_keys`` for the caller to act on
+        rather than being swallowed by a log line.
+        """
         os.makedirs(self.cache_dir, exist_ok=True)
         os.makedirs(self.data_dir, exist_ok=True)
 
-        refreshed = []
-        if not rebuild_only:
-            refreshed = self._download_years(force=force)
+        refreshed = [] if rebuild_only else self.source.sync(force=force)
+        self.stale_keys = list(self.source.failures) if not rebuild_only else []
+        if self.stale_keys:
+            logger.warning(
+                '%s: %d cache unit(s) could not be downloaded (%s%s); '
+                'the CSVs below are rebuilt from what is on disk and may be '
+                'behind the exchange. Re-run to pick them up.',
+                self.category, len(self.stale_keys), ', '.join(self.stale_keys[:5]),
+                ', ...' if len(self.stale_keys) > 5 else '',
+            )
 
-        current_cache = self.cache_path(self.year)
-        current_hash = _file_sha256(current_cache) if os.path.exists(current_cache) else None
-        if self._is_up_to_date(force, rebuild_only, refreshed, current_hash):
+        fingerprint = self.source.fingerprint()
+        if self._is_up_to_date(force, rebuild_only, refreshed, fingerprint):
             logger.info('%s already up to date; skip rebuild.', self.category)
+            # Skipping the rebuild does not make this run's download report
+            # irrelevant: the meta file is what a later reader consults, so it
+            # has to carry *this* run's stale keys, not the previous run's.
+            self._write_meta(fingerprint, refreshed)
             return pd.read_csv(self.raw_path, parse_dates=['date'])
 
-        data = self._load_contract_bars()
+        data = self.source.load_bars()
         _to_csv_atomic(self._format_dates(data), self.raw_path)
         weighted = _build_weighted(data)
         _to_csv_atomic(self._format_dates(weighted), self.weighted_path)
-        self._write_meta(current_hash, refreshed)
+        self._write_meta(fingerprint, refreshed)
         logger.info(
             '%s saved %d contract rows / %d weighted days -> %s',
             self.category, len(data), len(weighted), self.data_dir,
         )
         return data
 
-    def _download_years(self, force: bool) -> list:
-        refreshed = []
-        for year in self.years():
-            path = self.cache_path(year)
-            is_current = year == self.year
-            if not force and not is_current and os.path.exists(path) and os.path.getsize(path) > 64:
-                logger.info('%s%d cache hit, skip download.', self.category, year)
-                continue
-            url = _czce_url(self.category, year)
-            try:
-                _http_download(url, path)
-                refreshed.append(year)
-                logger.info('%s%d Update Done.', self.category, year)
-            except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError) as exc:
-                if os.path.exists(path) and os.path.getsize(path) > 64:
-                    logger.warning('%s%d Update Error (%s); keep existing cache.', self.category, year, exc)
-                else:
-                    logger.warning('%s%d Update Error (%s).', self.category, year, exc)
-        return refreshed
-
-    def _is_up_to_date(self, force, rebuild_only, refreshed, current_hash) -> bool:
+    def _is_up_to_date(self, force, rebuild_only, refreshed, fingerprint) -> bool:
         if force or rebuild_only:
             return False
         if not (os.path.exists(self.raw_path) and os.path.exists(self.weighted_path)):
             return False
-        if any(year < self.year for year in refreshed):
+        # The fingerprint only covers the newest cache unit, so refreshing
+        # anything older always forces a rebuild.
+        head = self.source.head_key()
+        if any(key != head for key in refreshed):
             return False
         meta = self._read_meta()
-        return bool(current_hash) and meta.get('sha256') == current_hash
-
-    def _load_contract_bars(self) -> pd.DataFrame:
-        frames = []
-        for year in self.years():
-            path = self.cache_path(year)
-            if not os.path.exists(path):
-                logger.warning('%s does not exist, skipping ...', path)
-                continue
-            try:
-                parsed = _clean_contract_bars(_read_czce_history(path))
-            except (ValueError, KeyError) as exc:
-                logger.warning('%s skipped (%s)', path, exc)
-                continue
-            frames.append(parsed)
-        if not frames:
-            raise ValueError(
-                f'No usable cache files for {self.category}; '
-                f'need columns {_REQUIRED_COLUMNS}'
-            )
-        data = pd.concat(frames, ignore_index=True)
-        data = data.drop_duplicates(subset=['date', 'contract'], keep='last')
-        return data.sort_values(['date', 'contract']).reset_index(drop=True)
+        return bool(fingerprint) and meta.get('fingerprint') == fingerprint
 
     def _read_meta(self) -> dict:
         if not os.path.exists(self._meta_path):
@@ -349,12 +165,16 @@ class DataUpdate:
         except (OSError, json.JSONDecodeError):
             return {}
 
-    def _write_meta(self, current_hash, refreshed) -> None:
+    def _write_meta(self, fingerprint, refreshed) -> None:
         payload = {
             'symbol': self.category,
-            'year': self.year,
-            'sha256': current_hash,
-            'refreshed_years': refreshed,
+            'exchange': self.exchange,
+            'head': self.source.head_key(),
+            'fingerprint': fingerprint,
+            'refreshed': refreshed,
+            # Non-empty means this build is known-incomplete: whoever reads the
+            # CSVs later can see that without re-running the download.
+            'stale_keys': list(self.stale_keys),
             'updated_at': datetime.now().isoformat(timespec='seconds'),
         }
         os.makedirs(self.cache_dir, exist_ok=True)
@@ -372,7 +192,7 @@ class DataUpdate:
 
 def main(argv=None) -> None:
     parser = argparse.ArgumentParser(
-        description='Download CZCE history and build OI-weighted daily bars.',
+        description='Download exchange history and build OI-weighted daily bars.',
     )
     parser.add_argument(
         'symbols',
@@ -382,7 +202,12 @@ def main(argv=None) -> None:
         % ', '.join(list_products()),
     )
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument('--force', action='store_true', help='Re-download every year')
+    mode.add_argument(
+        '--force',
+        action='store_true',
+        help='Re-download everything. Cheap for CZCE (a file per year), but for '
+             'SHFE/DCE this re-fetches every trading day since start_year.',
+    )
     mode.add_argument(
         '--rebuild-only',
         action='store_true',
@@ -392,15 +217,34 @@ def main(argv=None) -> None:
     logging.basicConfig(level=logging.INFO, format='%(message)s')
     symbols = require_products(args.symbols or list_products())
     failed = []
+    stale = []
     for symbol in symbols:
+        # Construction can fail too -- an unsupported exchange, a malformed
+        # registry row -- and that is this product's problem, not the run's.
+        job = None
         try:
-            DataUpdate(symbol).update(force=args.force, rebuild_only=args.rebuild_only)
+            job = DataUpdate(symbol)
+            job.update(force=args.force, rebuild_only=args.rebuild_only)
         except Exception as exc:
             failed.append((symbol, exc))
             logger.error('%s failed: %s', symbol, exc)
+            continue
+        if job is not None and job.stale_keys:
+            stale.append((symbol, len(job.stale_keys)))
+
+    # A partial download is the dangerous outcome: the CSVs exist, look normal,
+    # and are quietly behind the exchange. Exit non-zero so a scheduled refresh
+    # cannot report success on data it failed to fetch.
+    problems = []
     if failed:
-        names = ', '.join(sym for sym, _ in failed)
-        raise SystemExit(f'Data update failed for: {names}')
+        problems.append('failed for: ' + ', '.join(sym for sym, _ in failed))
+    if stale:
+        problems.append(
+            'incomplete (stale, re-run to complete): '
+            + ', '.join(f'{sym} ({n})' for sym, n in stale)
+        )
+    if problems:
+        raise SystemExit('Data update ' + '; '.join(problems))
 
 
 if __name__ == '__main__':

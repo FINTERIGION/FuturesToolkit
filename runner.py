@@ -2,7 +2,7 @@
 FuturesToolkit backtest runner.
 
 Usage (from the repo root):
-  python runner.py --symbols SA FG CF MA TA SR OI --start 2020-01-01 --end 2026-12-31 \
+  python runner.py --symbols SA FG CF RB BU C --start 2020-01-01 --end 2026-12-31 \
       --strategy double_ma --cash 100000
 
 To replay a tuned parameter set from ``research_runner.py optimize``, point
@@ -35,7 +35,11 @@ from strategies.base import BarContext, SetupContext
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_RESULTS_DIR = os.path.join(ROOT_DIR, 'results')
 
-DEFAULT_SYMBOLS = ['SA', 'FG', 'CF', 'MA', 'TA', 'SR', 'OI']
+DEFAULT_SYMBOLS = [
+    'SA', 'FG', 'CF',     # CZCE
+    'BU', 'RB', 'HC',     # SHFE
+    'C', 'JM', 'V',       # DCE
+]
 DEFAULT_START = '2020-01-01'
 DEFAULT_END = '2026-12-31'
 DEFAULT_CASH = 100_000.0
@@ -143,7 +147,7 @@ def _parse_args(argv=None) -> argparse.Namespace:
                               'here with the full trade log and charts.')
     parser.add_argument('--param', action='append', metavar='NAME=VALUE',
                          help='Override one strategy param; repeatable. Beats --params-from.')
-    parser.add_argument('--update-data', action='store_true', help='Refresh CZCE data before running')
+    parser.add_argument('--update-data', action='store_true', help='Refresh exchange data before running')
     parser.add_argument('--results-dir', default=DEFAULT_RESULTS_DIR)
     parser.add_argument('--keep-last', type=int, default=None,
                          help='Delete result files from all but the N most recent runs')

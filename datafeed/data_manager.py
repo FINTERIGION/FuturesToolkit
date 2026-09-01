@@ -48,11 +48,12 @@ class DataManager:
         Parameters
         ----------
         symbols : list[str], optional
-            Product codes to load, e.g. ``['SA', 'FG', 'CF', 'MA']``.
+            Product codes to load, e.g. ``['SA', 'FG', 'RB', 'C']``.
         symbol : str, optional
             Single-product alias used when ``symbols`` is omitted.
         update : bool
-            Whether to refresh data from the exchange (incremental: current year).
+            Whether to refresh data from the exchange first. Incremental: CZCE
+            re-fetches the current year, SHFE and DCE the last few days.
         """
         if symbols is None:
             symbols = [symbol] if symbol else ['SA']
@@ -76,16 +77,30 @@ class DataManager:
     # ------------------------------------------------------------------
 
     def _update_data(self):
-        """Refresh exchange history incrementally and regenerate weighted data."""
+        """Refresh exchange history incrementally and regenerate weighted data.
+
+        A product the exchange only partly handed over does not abort the run --
+        the cached history still backtests -- but it is called out, because the
+        alternative is a backtest silently ending a few days short.
+        """
+        stale = []
         for symbol in self.symbols:
             try:
                 path = self.weighted_path(symbol)
                 logger.info("Updating %s data ...", symbol)
-                DataUpdate(symbol).update()
+                job = DataUpdate(symbol)
+                job.update()
+                if job.stale_keys:
+                    stale.append(symbol)
                 logger.info("%s data update done. Path: %s", symbol, path)
             except Exception as e:
                 logger.error("Data update failed for %s: %s", symbol, e)
                 raise
+        if stale:
+            logger.warning(
+                "Incomplete download for %s -- backtesting on cached history "
+                "that may be behind the exchange.", ", ".join(stale),
+            )
 
     @staticmethod
     def _align_contract_ohlc(cdf: pd.DataFrame, index: pd.DatetimeIndex) -> pd.DataFrame:
@@ -172,7 +187,7 @@ class DataManager:
         return df
 
     def load_contracts_dataframe(self, symbol: str = None) -> pd.DataFrame:
-        """Load contract-level CZCE history from ``data/{symbol}.csv``."""
+        """Load contract-level exchange history from ``data/{symbol}.csv``."""
         symbol = self._sym(symbol)
         path = self.raw_path(symbol)
         if not os.path.exists(path):
