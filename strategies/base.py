@@ -147,6 +147,18 @@ class BarContext:
             return False
         return self._engine.market.products[sym].can_trade(self.i)
 
+    def queued_orders(self) -> dict:
+        """``{symbol: lot delta}`` queued so far this bar, as a copy.
+
+        Empty at the top of every ``on_bar``; the engine folds it into
+        ``pending`` afterwards. Reading it is what lets one strategy wrap
+        another and veto or shrink its orders without the two having to know
+        about each other -- see ``meta.filter.make_meta_filtered``. Pair it
+        with ``set_target``, which is idempotent per bar, to rewrite a
+        decision the wrapped strategy just made.
+        """
+        return dict(self._engine.queued)
+
     def contract(self, sym: str) -> str:
         return self._engine.market.products[sym].active_contract(self.i)
 

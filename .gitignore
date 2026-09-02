@@ -13,6 +13,7 @@ venv/
 data/
 cache/
 results/
+models/
 
 # Private strategies: ignore custom modules; keep base + tracked examples
 strategies/*

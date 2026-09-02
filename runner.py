@@ -147,6 +147,11 @@ def _parse_args(argv=None) -> argparse.Namespace:
                               'here with the full trade log and charts.')
     parser.add_argument('--param', action='append', metavar='NAME=VALUE',
                          help='Override one strategy param; repeatable. Beats --params-from.')
+    parser.add_argument('--meta-model', default=None,
+                         help='Path to a meta_runner.py `fit` artifact. Wraps --strategy so '
+                              'the model vetoes low-probability entries (exits are never '
+                              'blocked). The run is in-sample wherever the model was trained; '
+                              'use `meta_runner.py walkforward` to measure the filter.')
     parser.add_argument('--update-data', action='store_true', help='Refresh exchange data before running')
     parser.add_argument('--results-dir', default=DEFAULT_RESULTS_DIR)
     parser.add_argument('--keep-last', type=int, default=None,
@@ -265,14 +270,25 @@ def main(argv=None) -> dict:
 
     symbols = require_products(args.symbols)
     strategy_cls = load_strategy(args.strategy)
-    strategy_name = strategy_cls.__name__
     params = resolve_params(strategy_cls, args)
+
+    if args.meta_model:
+        from meta.filter import make_meta_filtered
+        from meta.model import load_model
+
+        meta_model = load_model(args.meta_model)
+        strategy_cls = make_meta_filtered(strategy_cls, meta_model)
+    strategy_name = strategy_cls.__name__
 
     logger.info('=' * 60)
     logger.info('  FuturesToolkit Backtest')
     logger.info('  Products : %s', ', '.join(symbols))
     logger.info('  Strategy : %s  [%s -> %s]', strategy_name, args.start, args.end)
     logger.info('  Slippage : %s', 'off' if not args.slippage else f'{args.slippage:g} price points')
+    if args.meta_model:
+        logger.info('  Meta     : %s (keep_rate %.2f, threshold %.4f)',
+                    os.path.basename(args.meta_model), meta_model.keep_rate,
+                    meta_model.threshold_value)
     logger.info('=' * 60)
 
     logger.info('[1/3] Loading data ...')

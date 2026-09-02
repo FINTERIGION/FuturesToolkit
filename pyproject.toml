@@ -16,13 +16,15 @@ dependencies = [
     "TA-Lib==0.7.1",
     "optuna==4.9.0",
     "scipy==1.17.1",
+    "scikit-learn==1.9.0",
+    "joblib==1.5.3",
 ]
 
 [project.optional-dependencies]
 test = ["pytest==9.1.1"]
 
 [tool.setuptools]
-packages = ["core", "datafeed", "strategies", "research"]
+packages = ["core", "datafeed", "strategies", "research", "meta", "live"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
