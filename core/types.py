@@ -15,10 +15,11 @@ class OrderType(Enum):
 
 class Reason(Enum):
     """Why a fill happened. Rolls and liquidations don't count as logical
-    trade entries/exits in the ledger; signal and stop fills do."""
+    trade entries/exits in the ledger; signal, stop and take-profit fills do."""
     SIGNAL = 'signal'
     ROLL = 'roll'
     STOP = 'stop'
+    TAKE_PROFIT = 'take_profit'
     LIQUIDATION = 'liquidation'
 
 

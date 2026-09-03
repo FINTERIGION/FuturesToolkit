@@ -10,7 +10,7 @@ python research_runner.py show-space --strategy double_ma
 
 # 2. Search
 python research_runner.py optimize --strategy double_ma \
-    --symbols SA FG CF BU RB HC --n-trials 100
+    --symbols SA CF RB AG --n-trials 100
 # -> results/optuna/DoubleMaStrategy_<ts>_best.json
 
 # 3. Evaluate the winner on the window the search never touched
@@ -40,10 +40,10 @@ Data and window flags:
 | Flag | Meaning | Default |
 | --- | --- | --- |
 | `--strategy` | Required | — |
-| `--symbols` | Products to load | `SA FG CF BU RB HC C JM V` |
+| `--symbols` | Products to load | `SA FG CF C` |
 | `--start` / `--end` | Full sample, folds are cut inside it | `2020-01-01` / `2026-12-31` |
 | `--cash` | Initial equity | `100000` |
-| `--slippage` | Fill slippage in price points | `0.0` |
+| `--slippage` | Fill slippage in ticks | `0.0` |
 | `--update-data` | Refresh exchange data first | off |
 
 Split flags:
@@ -62,17 +62,38 @@ Search and objective flags:
 | `--n-trials` | Optuna trials | `200` |
 | `--probe-samples` | Warmup probe samples (pad must cover the slowest product) | `20` |
 | `--lambda-std` | Penalty weight on the fold-to-fold standard deviation of the score | `0.5` |
-| `--min-trades-per-year` | Below this, the score is penalized | `4.0` |
+| `--min-trades-per-year` | How many trades a window is expected to produce per year | `4.0` |
 | `--dd-cap` | Drawdown above this is penalized | `0.35` |
+| `--sparse-penalty` | How hard to mark down a window that fell short of that expectation | `0.5` |
 | `--param name=kind:args` | Override one dimension, e.g. `slow_period=int:20:200`; repeatable | — |
 | `--study-name` | Optuna study name | auto |
 | `--results-dir` | Output directory | `results/optuna` |
 
-**Objective**: mean out-of-sample Sharpe across folds, penalized for too few
-trades, drawdown beyond `--dd-cap`, and forced liquidations, then penalized
-again by `--lambda-std ×` the standard deviation across folds. A parameter set
-that is excellent in one fold and terrible in the next scores worse than a
-merely decent one.
+**Objective**: mean out-of-sample Sharpe across folds, adjusted for how few
+trades the window produced, then penalized for drawdown beyond `--dd-cap`, for
+forced liquidations, and finally by `--lambda-std ×` the standard deviation
+across folds. A parameter set that is excellent in one fold and terrible in the
+next scores worse than a merely decent one.
+
+**Trading less can never raise a score.** Under-trading is handled
+asymmetrically, on purpose: a *positive* Sharpe is scaled down by the fraction
+of `--min-trades-per-year` the window actually delivered, because a Sharpe of 3
+off two trades is a number the window cannot support; a *negative* one is taken
+at face value, because explaining a bad sample away as "too few trades to
+judge" is how a backtest flatters itself. On top of that, `--sparse-penalty ×`
+whatever fraction is missing comes off the score regardless of sign, which puts
+a floor of `-sparse-penalty` under the do-nothing corner of the space.
+
+That floor is the point. With a single multiplicative penalty, a configuration
+that never traded scored exactly `0.0` and beat every honest loser — so a
+search over a space with no edge in it returned "do nothing" as `best_params`,
+with a clean-looking value near zero rather than a negative one. If the best
+trial still never opens a position in any validation fold, `optimize` says so
+in a warning: that is the search reporting no edge, not a tuned parameter set.
+
+Raise `--sparse-penalty` toward `1.0` to demand the evidence be there before a
+configuration counts at all; lower it to let a promising-but-thin one keep
+being explored.
 
 ## `holdout`
 
@@ -98,3 +119,13 @@ point: a holdout you can re-query is just another training set.
 
 Read them before the equity curve. A high Sharpe with PBO near 1 and no
 plateau is a number, not an edge.
+
+PBO and the Deflated Sharpe are both computed on one `[n_trials, n_bars]`
+matrix of daily returns over the pre-holdout span, and each trial's curve is
+placed at the bar it actually starts on. A trial can come up short at either
+end: short at the *head* when its indicators needed more warmup than the pad
+covers, short at the *tail* when its account blew up and the run stopped there.
+The bars a trial never traded stand in as zeros, and for a blow-up that reads
+as a calm stretch rather than a dead account — so when `n_trials_blown_up` in
+the report is a meaningful share of `n_trials_completed`, treat both
+diagnostics as optimistic. `optimize` warns when that count is non-zero.

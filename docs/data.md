@@ -48,6 +48,7 @@ else in the codebase needs to know about it.
 | `name`, `name_zh` | Labels used in reports and charts |
 | `start_year` | First year to download |
 | `multiplier` | Contract size (units per lot) |
+| `tick_size` | Minimum price increment; the unit `--slippage` is counted in |
 | `margin_rate` | Initial margin as a fraction of notional |
 | `commission_rate` | Fee as a fraction of notional |
 | `commission_per_lot` | Fee as fixed CNY per lot |
@@ -61,4 +62,4 @@ calendar day of the month `roll_lead_months` before its delivery month — the
 into a date → main-contract map.
 
 Contract codes are normalised to uppercase + 4-digit YYMM across all venues
-(`RB2601`, `C2601`).
+(`RB2610`, `C2601`).

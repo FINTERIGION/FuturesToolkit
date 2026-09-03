@@ -8,8 +8,8 @@ Strategy-agnostic -- every subcommand works on any strategy
 Usage (from the repo root):
   python meta_runner.py harvest     --strategy double_ma
   python meta_runner.py walkforward --strategy double_ma --shuffle-control
-  python meta_runner.py holdout     --report results/meta/<...>_walkforward.json --keep-rate 0.65
-  python meta_runner.py fit         --strategy double_ma --keep-rate 0.65 -o models/dma.joblib
+  python meta_runner.py holdout     --report results/meta/<...>_walkforward.json --keep-rate 0.6
+  python meta_runner.py fit         --strategy double_ma --keep-rate 0.6 -o models/dma.joblib
   python meta_runner.py signal      --model models/dma.joblib
 
 The intended order is exactly that: ``harvest`` says whether there are enough
@@ -69,8 +69,8 @@ from meta.model import (
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_RESULTS_DIR = os.path.join(ROOT_DIR, 'results', 'meta')
 LIVE_RESULTS_DIR = os.path.join(ROOT_DIR, 'results', 'live')
-DEFAULT_SYMBOLS = ['SA', 'FG', 'CF', 'BU', 'RB', 'HC', 'C', 'JM', 'V']
-DEFAULT_KEEP_RATES = [1.0, 0.8, 0.65, 0.5]
+DEFAULT_SYMBOLS = ['SA', 'FG', 'CF', 'C']
+DEFAULT_KEEP_RATES = [1.0, 0.8, 0.7, 0.6, 0.5]
 MIN_SAMPLES = 300
 
 logger = logging.getLogger('futurestoolkit.meta')
@@ -308,7 +308,7 @@ def cmd_walkforward(args) -> None:
 
     shuffled = None
     if args.shuffle_control and results:
-        target = min(args.keep_rate, key=lambda k: abs(k - 0.65))
+        target = min(args.keep_rate, key=lambda k: abs(k - 0.6))
         logger.info('--- shuffled-label control (kind=%s keep_rate=%.2f) ---', args.kind[0], target)
         sh = _evaluate_keep_rate(
             market, strategy_cls, params, samples, folds, baselines,
@@ -559,7 +559,7 @@ def _add_data_args(p, *, from_artifact=False):
     if not from_artifact:
         p.add_argument('--strategy', required=True, choices=_strategy_choices())
         p.add_argument('--cash', type=float, default=1_000_000.0)
-        p.add_argument('--slippage', type=float, default=1.0)
+        p.add_argument('--slippage', type=float, default=1.0)   # ticks
         p.add_argument('--lots', type=int, default=None)
         p.add_argument('--params-from', default=None,
                         help="Load strategy params from an optimize '*_best.json' report.")
@@ -614,7 +614,7 @@ def _parse_args(argv=None) -> argparse.Namespace:
 
     p = sub.add_parser('fit', help='Fit a final model on all history and save it.')
     _add_data_args(p)
-    p.add_argument('--keep-rate', type=float, default=0.65)
+    p.add_argument('--keep-rate', type=float, default=0.6)
     p.add_argument('--kind', default='rf', choices=['rf', 'lr'])
     p.add_argument('--seed', type=int, default=42)
     p.add_argument('-o', '--out', default=os.path.join(ROOT_DIR, 'models', 'meta.joblib'))

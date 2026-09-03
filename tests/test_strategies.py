@@ -1,7 +1,7 @@
 """Cross-sectional momentum strategy tests on a synthetic multi-product market.
 
-Five products with constant per-bar growth rates (SA strongest up, BU
-strongest down, FG/CF/RB in between) give a momentum ranking that is exactly
+Five products with constant per-bar growth rates (SA strongest up, RB
+strongest down, AG/CF/JM in between) give a momentum ranking that is exactly
 constant from the first valid bar onward -- ``close[t]/close[t-lookback]``
 for a geometric series depends only on the growth rate, not on ``t``. That
 determinism is what lets these tests assert exact long/short/flat outcomes
@@ -16,7 +16,7 @@ from strategies.base import BarContext, SetupContext
 from strategies.cross_sectional_momentum import CrossSectionalMomentumStrategy
 from tests.conftest import build_market, build_panel
 
-_GROWTH = {'SA': 0.02, 'FG': 0.01, 'CF': 0.0, 'RB': -0.01, 'BU': -0.02}
+_GROWTH = {'SA': 0.02, 'AG': 0.01, 'CF': 0.0, 'JM': -0.01, 'RB': -0.02}
 _PARAMS = {
     'lookback': 10, 'skip': 0, 'atr_period': 5, 'top_k': 1,
     'rebalance_days': 5, 'risk_budget': 0.5, 'max_gross_margin': 0.9,
@@ -59,8 +59,8 @@ def _run(market, strategy_cls=CrossSectionalMomentumStrategy, **overrides):
 def test_ranks_and_takes_both_sides():
     eng, _ = _run(_build_universe())
     assert eng.broker.net_position('SA') > 0     # strongest uptrend -> long
-    assert eng.broker.net_position('BU') < 0     # strongest downtrend -> short
-    for sym in ('FG', 'CF', 'RB'):
+    assert eng.broker.net_position('RB') < 0     # strongest downtrend -> short
+    for sym in ('AG', 'CF', 'JM'):
         assert eng.broker.net_position(sym) == 0
 
 

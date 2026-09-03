@@ -44,8 +44,15 @@ def _note(row: SignalRow) -> str:
         return 'no session on the last bar'
     if row.verdict:
         return row.verdict
-    if row.stop_rule and row.stop is None:
-        return 'stop arms after the fill'
+    pending = [
+        name for name, rule, armed in (
+            ('stop', row.stop_rule, row.stop),
+            ('take profit', row.take_profit_rule, row.take_profit),
+        )
+        if rule and armed is None
+    ]
+    if pending:
+        return f"{' and '.join(pending)} arm{'' if len(pending) > 1 else 's'} after the fill"
     return 'hold' if row.current_simulated else '-'
 
 
@@ -60,6 +67,9 @@ _COLUMNS = (
     ('proba',     9, '>', lambda r: _num(r.proba),              True),
     ('thresh',    9, '>', lambda r: _num(r.threshold),          True),
     ('stop',     11, '>', lambda r: _num(r.stop, 2),            False),
+    # Not "target": that header is already taken by the target *position*,
+    # which the footer calls out as the actionable column.
+    ('take profit', 13, '>', lambda r: _num(r.take_profit, 2),  False),
     ('note',      0, '<', _note,                                False),
 )
 

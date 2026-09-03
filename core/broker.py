@@ -34,7 +34,14 @@ class Position:
     contract: str
     size: int          # signed lots
     avg_entry: float
-    last_mark: float    # most recent settle price seen (carried forward on dark bars)
+    # Most recent price seen for this contract: today's settle once SETTLE has
+    # run, and the fill price when one lands before that. Every fill updates
+    # it, adds included -- ``valuation()`` is what the OPEN-phase margin check
+    # reads, and it runs mid-bar, after some symbols have filled and before
+    # today's settle exists. Leaving an add on yesterday's mark, as this used
+    # to, sized the margin of every symbol behind it in the loop off a stale
+    # price. Carried forward unchanged on a dark bar.
+    last_mark: float
 
 
 class Broker:
@@ -83,6 +90,7 @@ class Broker:
                 pos.avg_entry * qty_pos + price * qty_fill
             ) / (qty_pos + qty_fill)
             pos.size += size
+            pos.last_mark = price
         else:
             # Reduce or flip: realize the closed portion into cash now.
             closing = min(abs(pos.size), abs(size))
@@ -133,6 +141,45 @@ class Broker:
             equity += (mark - pos.avg_entry) * pos.size * mult
             margin_used += abs(pos.size) * mark * mult * margin_rate
         return equity, margin_used, equity - margin_used
+
+    def valuation(self) -> Tuple[float, float, float]:
+        """``(equity, margin_used, available)`` at each position's carried mark.
+
+        The same arithmetic as ``mark_to_market`` with no new prices to apply,
+        so there is one valuation formula here rather than two that can drift
+        apart. Safe to call mid-bar: it neither needs today's settle -- which
+        does not exist yet at OPEN, where the margin check runs -- nor moves
+        any position's mark.
+        """
+        return self.mark_to_market(lambda symbol, contract: None)
+
+    def margin_for(self, symbol: str, size: int, price: float) -> float:
+        """Initial margin on ``size`` lots of ``symbol`` marked at ``price``."""
+        costs = product_costs(symbol)
+        return abs(size) * price * costs['multiplier'] * costs['margin_rate']
+
+    def can_afford(self, symbol: str, contract: str, size: int, price: float) -> bool:
+        """Whether filling ``size`` lots at ``price`` leaves the account solvent.
+
+        An order that does not *raise* the margin requirement always passes --
+        closes, reductions, and flips into a cheaper leg. That exemption is the
+        point: a hard rejection must never trap a position inside a margin
+        call, which is exactly when the account most needs to get out. Anything
+        that raises the requirement has to leave ``equity >= margin_used`` once
+        filled, or it is refused.
+
+        Only strategy orders are put through this. A roll is the same exposure
+        on a different contract and a forced liquidation is the remedy for
+        insolvency, so neither is something the account can decline.
+        """
+        equity, margin_used, _ = self.valuation()
+        pos = self.positions.get((symbol, contract))
+        held = pos.size if pos is not None else 0
+        before = self.margin_for(symbol, held, pos.last_mark) if pos is not None else 0.0
+        after = margin_used - before + self.margin_for(symbol, held + size, price)
+        if after <= margin_used:
+            return True
+        return equity - after >= 0
 
     def force_liquidate(self, bar_index: int, date: Date) -> List[Fill]:
         """Flatten every position at its last mark (call right after

@@ -20,7 +20,7 @@ from core.params import Int
 from strategies import discover_strategies
 from strategies.base import BarContext, SetupContext, Strategy
 
-from research.objective import _finite, score
+from research.objective import DEFAULT_SPARSE_PENALTY, _finite, score
 from research.optimize import run_study
 from research.runner_api import run_window
 from research.space import resolve_space
@@ -60,6 +60,34 @@ def _trending_market(n_bars: int = 900, seed: int = 0):
     panel = build_panel('SA', n_bars, weighted=weighted, contracts=contracts,
                          contract_by_bar=['C1'] * n_bars, first_bar=0)
     return build_market({'SA': panel}, n_bars)
+
+
+def _crashing_market(sym: str = 'AU', n_bars: int = 600, crash_bar: int = 400):
+    """A monotone uptrend that gaps to near zero in a single bar.
+
+    Monotone so the crossover is reliably long into the gap, and on a product
+    with a large multiplier so one lot is enough to take equity through zero:
+    that is what makes a run stop early and leaves its equity curve short at
+    the *tail* rather than the head.
+    """
+    t = np.arange(n_bars, dtype='float64')
+    close = 100.0 + 0.20 * t
+    close[crash_bar:] = 1.0
+    open_ = np.empty(n_bars)
+    open_[0] = close[0]
+    open_[1:] = close[:-1]
+    high = np.maximum(open_, close) + 0.2
+    low = np.minimum(open_, close) - 0.2
+    oi = np.full(n_bars, 5000.0)
+    volume = np.full(n_bars, 1500.0)
+    weighted = {'open': open_, 'high': high, 'low': low, 'close': close,
+                'settle': close.copy(), 'oi': oi, 'volume': volume,
+                'session': np.ones(n_bars)}
+    contracts = {'C1': {i: (open_[i], high[i], low[i], close[i], close[i], oi[i], volume[i])
+                        for i in range(n_bars)}}
+    panel = build_panel(sym, n_bars, weighted=weighted, contracts=contracts,
+                        contract_by_bar=['C1'] * n_bars, first_bar=0)
+    return build_market({sym: panel}, n_bars)
 
 
 @pytest.fixture(scope='module')
@@ -309,6 +337,50 @@ def test_score_penalizes_excess_drawdown():
     assert score(high_dd, window_years=1.0, dd_cap=0.35) < score(base, window_years=1.0, dd_cap=0.35)
 
 
+def _m(sharpe, n_trades, **extra):
+    return {'sharpe_ratio': sharpe, 'n_trades': n_trades, 'max_drawdown': 5.0,
+            'n_forced_liquidations': 0, **extra}
+
+
+def test_a_configuration_that_never_traded_is_not_the_best_one():
+    """Under-trading used to be a *multiplicative* penalty, which scales a
+    negative score toward zero -- i.e. improves it. A run that never traded
+    therefore scored exactly 0.0 and outranked every honest loser, so a search
+    over a space with no edge in it returned "do nothing" as `best_params`
+    with a clean-looking value near zero instead of saying there was no edge.
+    """
+    wy = 1.0
+    no_trades = score(_m(0.0, 0), window_years=wy)
+    small_loss = score(_m(-0.2, 100), window_years=wy)
+    assert no_trades < small_loss
+    assert no_trades == pytest.approx(-DEFAULT_SPARSE_PENALTY)
+
+
+@pytest.mark.parametrize('sharpe', [-3.0, -0.2, 0.0, 0.5, 2.0])
+def test_trading_less_never_improves_a_score(sharpe):
+    """The invariant the old multiplicative penalty broke. Scaling a score
+    toward zero raises it whenever it is negative, so thinning the trade count
+    used to be a way to *improve* a losing configuration."""
+    dense = score(_m(sharpe, 100), window_years=1.0)
+    for n in (50, 4, 2, 1, 0):
+        assert score(_m(sharpe, n), window_years=1.0) <= dense
+    assert score(_m(sharpe, 1), window_years=1.0) < dense
+
+
+def test_sparse_penalty_dials_how_much_thin_evidence_counts():
+    thin_but_good = _m(2.0, 1)
+    lenient = score(thin_but_good, window_years=1.0, sparse_penalty=0.0)
+    default = score(thin_but_good, window_years=1.0)
+    strict = score(thin_but_good, window_years=1.0, sparse_penalty=1.0)
+    assert lenient > default > strict
+    # sparse_penalty=0 is pure shrinkage toward "no edge", never past it
+    assert 0.0 < lenient < 2.0
+    # a fully-sampled window is untouched by the dial
+    dense = _m(1.5, 100)
+    assert score(dense, window_years=1.0, sparse_penalty=0.0) == pytest.approx(
+        score(dense, window_years=1.0, sparse_penalty=1.0))
+
+
 # ---------------------------------------------------------------------
 # runner.py param plumbing (the optimize -> full-backtest handoff)
 # ---------------------------------------------------------------------
@@ -382,3 +454,81 @@ def test_optimize_run_study_never_touches_holdout_bars(market, tmp_path, monkeyp
     holdout_start = out['report']['holdout_window']['start']
     for w in seen_windows:
         assert w.end <= holdout_start, f"window {w} reaches into the holdout region"
+
+
+def test_a_blown_up_trials_returns_are_not_shifted_forward_in_time(tmp_path, monkeypatch):
+    """A run that ends early is missing bars at the *tail*; one whose
+    indicators outran the pad is missing them at the *head*. Zero-filling the
+    head unconditionally -- which is what this did -- slid every blown-up
+    trial's whole return series forward in time. ``pbo_cscv`` slices that same
+    axis into contiguous blocks and compares trials block by block, so a
+    shifted trial was being scored against the wrong period in every split.
+    """
+    import research.optimize as optimize_mod
+    from strategies.double_ma import DoubleMaStrategy
+
+    seen = {}
+    real_pbo = optimize_mod.pbo_cscv
+
+    def spy(returns_matrix, **kwargs):
+        seen['matrix'] = returns_matrix.copy()
+        return real_pbo(returns_matrix, **kwargs)
+
+    monkeypatch.setattr(optimize_mod, 'pbo_cscv', spy)
+
+    # A trending series that collapses two thirds of the way through. The
+    # crossover is long into it, and on this cash one lot is enough to take
+    # equity through zero -- so trials stop mid-window and their curves end
+    # short at the tail, which is the case that used to be mis-padded.
+    out = run_study(
+        strategy_cls=DoubleMaStrategy, symbols=['AU'], market=_crashing_market(),
+        cash=30_000.0, n_trials=4, n_folds=2, probe_samples=3,
+        results_dir=str(tmp_path),
+    )
+    assert out['report']['n_trials_blown_up'] > 0, 'expected a blow-up to exercise this path'
+
+    matrix = seen['matrix']
+    width = out['report']['holdout_window']['start'] - out['report']['reserve_bars']
+    assert matrix.shape[1] == width
+
+    spans = [(int(np.argmax(row != 0)), int(np.argmax(row[::-1] != 0)))
+             for row in matrix if row.any()]
+    # `reserve_bars` is sized to cover the whole space's warmup, so every trial
+    # records from the window's first bar: no trial has anything to pad at the
+    # head. A blown-up one pads at the tail instead -- which is exactly what
+    # the old code put at the head, sliding the series forward by that much.
+    assert max(lead for lead, _ in spans) <= 2, 'returns were shifted off the window start'
+    assert any(trail > 10 for _, trail in spans), 'expected a truncated tail to pad'
+
+
+def test_packaged_modules_do_not_import_top_level_scripts():
+    """``pyproject.toml`` ships ``core``/``live``/``research``/... as packages
+    and leaves ``runner.py`` and ``plotting.py`` at the repo root, uninstalled.
+    ``live.signal`` and ``research.runner_api`` used to import
+    ``run_single_backtest`` from ``runner``, so ``pip install .`` produced a
+    tree that raised ``ModuleNotFoundError`` the first time either was used.
+    """
+    import ast
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    packaged = ('core', 'datafeed', 'strategies', 'research', 'meta', 'live')
+    top_level = {p.stem for p in root.glob('*.py')}
+    assert {'runner', 'plotting'} <= top_level      # guard the premise
+
+    offenders = []
+    for package in packaged:
+        for path in (root / package).rglob('*.py'):
+            tree = ast.parse(path.read_text(encoding='utf-8'))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and node.level == 0:
+                    names = [(node.module or '').split('.')[0]]
+                elif isinstance(node, ast.Import):
+                    names = [a.name.split('.')[0] for a in node.names]
+                else:
+                    continue
+                offenders += [
+                    f'{path.relative_to(root)}: {name}'
+                    for name in names if name in top_level
+                ]
+    assert not offenders, f'packaged modules importing unpackaged scripts: {offenders}'

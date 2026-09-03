@@ -23,15 +23,15 @@ python meta_runner.py harvest --strategy double_ma
 
 # 2. Purged walk-forward: does filtering add anything out of sample?
 python meta_runner.py walkforward --strategy double_ma \
-    --keep-rate 1.0 0.8 0.6 0.5 0.4 --kind rf lr --shuffle-control
+    --keep-rate 1.0 0.8 0.7 0.6 0.5 --kind rf lr --shuffle-control
 # -> results/meta/<Strategy>_<ts>_walkforward.json
 
 # 3. Confirm on the locked window -- once, and only if step 2 said SIGNAL
 python meta_runner.py holdout --report results/meta/<...>_walkforward.json \
-    --keep-rate 0.5 --kind rf
+    --keep-rate 0.6 --kind rf
 
 # 4. Freeze a model trained on everything up to today
-python meta_runner.py fit --strategy double_ma --keep-rate 0.65 -o models/dma.joblib
+python meta_runner.py fit --strategy double_ma --keep-rate 0.6 -o models/dma.joblib
 
 # 5. Today's filtered target positions
 python meta_runner.py signal --model models/dma.joblib --update-data
@@ -53,10 +53,10 @@ a filter judged at zero slippage is judged on trades it could not have got.
 | Flag | Meaning | Default |
 | --- | --- | --- |
 | `--strategy` | Required. The primary | — |
-| `--symbols` | Products to load | `SA FG CF BU RB HC C JM V` |
+| `--symbols` | Products to load | `SA FG CF C` |
 | `--start` / `--end` | Sample window | `2015-01-01` / `2026-12-31` |
 | `--cash` | Initial equity | `1000000` |
-| `--slippage` | Fill slippage in price points | `1.0` |
+| `--slippage` | Fill slippage in ticks | `1.0` |
 | `--lots` | Lots per trade | strategy default |
 | `--params-from` / `--param` | Primary's params, from an `optimize` report or inline | — |
 | `--update-data` | Refresh exchange data first | off |
@@ -75,7 +75,7 @@ is nothing to train on, and the later commands say so.
 | `--embargo` | Bars dropped between train and test | `10` |
 | `--holdout-frac` | Trailing fraction locked away | `0.20` |
 | `--seed` | Model seed | `42` |
-| `--keep-rate` | Fractions of entries to keep, one arm each. `1.0` is the no-op self-check | `1.0 0.8 0.65 0.5` |
+| `--keep-rate` | Fractions of entries to keep, one arm each. `1.0` is the no-op self-check | `1.0 0.8 0.7 0.6 0.5` |
 | `--kind` | Model families: `rf`, `lr` | `rf lr` |
 | `--shuffle-control` | Refit on permuted labels to measure the trade-less-often effect | off |
 | `--results-dir` | Output directory | `results/meta` |
@@ -102,7 +102,7 @@ it.
 
 | Flag | Meaning | Default |
 | --- | --- | --- |
-| `--keep-rate` | Threshold quantile for the frozen model | `0.65` |
+| `--keep-rate` | Threshold quantile for the frozen model | `0.6` |
 | `--kind` | `rf` or `lr` | `rf` |
 | `--seed` | Model seed | `42` |
 | `-o` / `--out` | Artifact path | `models/meta.joblib` |
@@ -110,6 +110,35 @@ it.
 Writes `<out>` plus `<out>.json` recording features, params and the training
 window. The artifact carries the primary, its params and the training universe,
 which is why `signal` and `live_runner.py --model` need nothing else.
+
+### A model artifact is executable code
+
+`.joblib` is pickle. Loading one **runs whatever the file says to run**, before
+any validation in `load_model` gets a chance — the feature-set check happens
+after the danger has passed, not before it. Treat an artifact exactly as you
+would a `.py` file someone handed you:
+
+- Load only artifacts this toolkit produced on a machine you control. Nothing
+  here ever downloads a model, and nothing should be added that does.
+- `--meta-model` and `--model` take a path and run it. There is no sandbox.
+- Sharing a model means sharing code. Ship the params and the `fit` command
+  instead, and let the other side refit.
+
+There is no unpickler allowlist here on purpose: restricting `find_class` to
+`sklearn.*`/`numpy.*` still leaves a surface with known gadget chains, and it
+would buy a sense of safety it cannot deliver. If artifacts ever need to arrive
+from elsewhere, the answer is to stop using pickle — export the estimator to
+ONNX or a plain description of the fitted trees — not to filter it.
+
+Two things `load_model` *does* check, both against the sidecar:
+
+- **The scikit-learn version that fitted it.** Unpickling an estimator across
+  versions is unsupported and can change what it predicts without failing, and
+  a model file outlives the virtualenv that made it. A mismatch warns; refit to
+  be sure the gate behaves as `walkforward` measured it.
+- **That the two files are still a pair.** They are written together and copied
+  around separately. This catches a mistake, never tampering — whoever can
+  write the `.joblib` can write the `.json` beside it.
 
 ## `signal`
 

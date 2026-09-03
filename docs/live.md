@@ -27,11 +27,11 @@ because everything after that is the same computation.
 | --- | --- | --- |
 | `--strategy` | A strategy from `strategies/`, run ungated | — |
 | `--model` | A `meta_runner.py fit` artifact: runs the primary it was trained on, entries gated by the model | — |
-| `--symbols` | Products to load | training universe with `--model`, else `SA FG CF BU RB HC C JM V` |
+| `--symbols` | Products to load | training universe with `--model`, else `SA FG CF C` |
 | `--start` | Start of the replay. Sets the simulated position and equity the signal is computed from — keep it stable between runs | `2015-01-01` |
 | `--end` | End of the replay | `2026-12-31` |
 | `--cash` | Set this to your **real** account equity for strategies that size off equity | training cash with `--model`, else `1000000` |
-| `--slippage` | Fill slippage in price points | training value with `--model`, else `1.0` |
+| `--slippage` | Fill slippage in ticks | training value with `--model`, else `1.0` |
 | `--lots` | `--strategy` only | strategy default |
 | `--params-from` / `--param` | `--strategy` only: params from an `optimize` report, or inline | — |
 | `--update-data` | Refresh exchange data first. Without it the signal is as of the last bar on disk, which may not be today | off |

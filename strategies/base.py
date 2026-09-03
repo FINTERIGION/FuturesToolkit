@@ -203,8 +203,18 @@ class BarContext:
         self._engine.queued[sym] = self._engine.queued.get(sym, 0) - int(lots)
 
     # ------------------------------------------------------------------
-    # Protective stop
+    # Protective bracket: stop and take-profit
     # ------------------------------------------------------------------
+    #
+    # Both legs arm at the *next* OPEN, against the fill that just happened,
+    # and are then checked intrabar against the execution contract's high/low.
+    # Prefer ``distance`` to ``price``: signals come off the OI-weighted
+    # continuous series but fills land on a real contract, and a distance is
+    # anchored on the actual fill so the basis between the two cancels.
+    #
+    # The two form an OCO pair -- whichever trips first flattens the position
+    # and cancels the other. A bar that touches both is resolved by
+    # ``Engine._bracket_hit``, which prefers the stop.
 
     def set_stop(self, sym: str, price: Optional[float] = None, distance: Optional[float] = None) -> None:
         if price is not None:
@@ -215,6 +225,27 @@ class BarContext:
     def cancel_stop(self, sym: str) -> None:
         self._engine.stop_spec.pop(sym, None)
         self._engine.live_stop.pop(sym, None)
+
+    def set_take_profit(self, sym: str, price: Optional[float] = None, distance: Optional[float] = None) -> None:
+        """Target that closes the whole position when touched intrabar.
+
+        Note this is a *touch* fill, at the target price (or at the open when
+        the bar gapped past it). That is the right model for a resting limit
+        order, and it is not the same rule as letting the bar close through
+        the target and leaving at the next open -- see the measurement in
+        ``strategies/momentum_barrier.py``, where the second rule is worth
+        roughly twice as much because the trades that blow through the target
+        are the ones worth keeping. Which rule suits a strategy is an
+        empirical question; this one is opt-in.
+        """
+        if price is not None:
+            self._engine.tp_spec[sym] = {'price': float(price)}
+        elif distance is not None:
+            self._engine.tp_spec[sym] = {'distance': float(distance)}
+
+    def cancel_take_profit(self, sym: str) -> None:
+        self._engine.tp_spec.pop(sym, None)
+        self._engine.live_tp.pop(sym, None)
 
     # ------------------------------------------------------------------
     # Sizing

@@ -2,7 +2,7 @@
 FuturesToolkit backtest runner.
 
 Usage (from the repo root):
-  python runner.py --symbols SA FG CF RB BU C --start 2020-01-01 --end 2026-12-31 \
+  python runner.py --symbols SA CF RB AG C --start 2020-01-01 --end 2026-12-31 \
       --strategy double_ma --cash 100000
 
 To replay a tuned parameter set from ``research_runner.py optimize``, point
@@ -22,23 +22,24 @@ import logging
 import os
 import re
 
-from core.engine import Engine
-from core.market import MarketData, build_market_data
-from core.metrics import compute_metrics
+from core.backtest import run_single_backtest
+from core.market import build_market_data
 from core.ledger import TRADE_LOG_FIELDS
 from datafeed.data_manager import DataManager
 from datafeed.products import list_products, require_products
 from plotting import BacktestPlotter
 from strategies import discover_strategies, load_strategy
-from strategies.base import BarContext, SetupContext
+
+# Re-exported: this used to be defined here, and `meta_runner.py` and the
+# tests still reach it by this name.
+__all__ = ['run_single_backtest', 'parse_param_value', 'resolve_params', 'main']
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_RESULTS_DIR = os.path.join(ROOT_DIR, 'results')
 
 DEFAULT_SYMBOLS = [
-    'SA', 'FG', 'CF',     # CZCE
-    'BU', 'RB', 'HC',     # SHFE
-    'C', 'JM', 'V',       # DCE
+    'SA', 'FG', 'CF',   # CZCE
+    'C',                # DCE
 ]
 DEFAULT_START = '2020-01-01'
 DEFAULT_END = '2026-12-31'
@@ -49,29 +50,6 @@ DEFAULT_STRATEGY = 'double_ma'
 STRATEGIES = discover_strategies()
 
 logger = logging.getLogger('futurestoolkit.runner')
-
-
-def run_single_backtest(
-    market: MarketData,
-    strategy_cls: type,
-    params: dict,
-    cash: float,
-    slippage: float = 0.0,
-    warmup_bars: int = 0,
-) -> dict:
-    """Run one backtest with no side effects (no plotting, no file writes).
-
-    Reused by both ``main()`` below and ``research_runner.py``, which runs it
-    once per trial per fold of the parameter search.
-    """
-    strategy = strategy_cls(**params)
-    engine = Engine(market, strategy, initial_cash=cash, slippage=slippage, warmup_bars=warmup_bars)
-    result = engine.run_backtest(SetupContext, BarContext)
-    metrics = compute_metrics(
-        result['equity_records'], result['trade_logs'], cash,
-        liquidation_count=result['liquidation_count'],
-    )
-    return {'result': result, 'metrics': metrics, 'engine': engine}
 
 
 def parse_param_value(raw: str) -> tuple:
@@ -138,7 +116,8 @@ def _parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument('--strategy', choices=sorted(STRATEGIES), default=DEFAULT_STRATEGY,
                          help='Strategy to run')
     parser.add_argument('--slippage', type=float, default=DEFAULT_SLIPPAGE,
-                         help='Fill slippage in price points')
+                         help='Fill slippage in ticks, scaled per product by '
+                              "products.py's tick_size")
     parser.add_argument('--lots', type=int, default=None,
                          help='Lots per trade (strategies that use it); default 1')
     parser.add_argument('--params-from', default=None,
@@ -192,8 +171,15 @@ def _print_summary(metrics: dict, log_path: str) -> None:
             f'  Trade Log           : {log_path}', sep,
         ]))
         return
-    lines = [
-        sep, '  Backtest Result Summary', sep,
+    lines = [sep, '  Backtest Result Summary', sep]
+    if metrics.get('blown_up'):
+        # Loud, and above the numbers: every figure below is a truncated window.
+        lines += [
+            '  *** ACCOUNT BLOWN UP -- run stopped early ***',
+            '  Equity hit zero; the bars after that were never traded.',
+            sep,
+        ]
+    lines += [
         f"  Initial Cash        : {metrics.get('initial_cash', 0):>14,.2f} CNY",
         f"  Final Equity        : {metrics.get('final_equity', 0):>14,.2f} CNY",
         f"  Total Return        : {metrics.get('total_return', 0):>14.4f} %",
@@ -228,6 +214,7 @@ def _print_summary(metrics: dict, log_path: str) -> None:
         f"  Winning Trades      : {metrics.get('n_winning', 0):>14}",
         f"  Losing Trades       : {metrics.get('n_losing', 0):>14}",
         f"  Forced Liquidations : {metrics.get('n_forced_liquidations', 0):>14}",
+        f"  Rejected Orders     : {metrics.get('n_rejected_orders', 0):>14}",
         sep,
     ]
     for symbol, stats in metrics.get('by_symbol', {}).items():
@@ -236,6 +223,14 @@ def _print_summary(metrics: dict, log_path: str) -> None:
             f"net_pnl={stats['net_pnl']:>12,.2f}  expectancy={stats['expectancy']:>10.2f}"
         )
     if metrics.get('by_symbol'):
+        lines.append(sep)
+    for reason, stats in sorted(metrics.get('by_exit_reason', {}).items()):
+        lines.append(
+            f"  exit={reason:<12} n={stats['n_trades']:3d} ({stats['share']:5.1f}%)  "
+            f"win_rate={stats['win_rate']:6.2f}%  "
+            f"net_pnl={stats['net_pnl']:>12,.2f}  expectancy={stats['expectancy']:>10.2f}"
+        )
+    if metrics.get('by_exit_reason'):
         lines.append(sep)
     lines += [f'  Trade Log           : {log_path}', sep]
     logger.info('\n'.join(lines))
@@ -284,7 +279,7 @@ def main(argv=None) -> dict:
     logger.info('  FuturesToolkit Backtest')
     logger.info('  Products : %s', ', '.join(symbols))
     logger.info('  Strategy : %s  [%s -> %s]', strategy_name, args.start, args.end)
-    logger.info('  Slippage : %s', 'off' if not args.slippage else f'{args.slippage:g} price points')
+    logger.info('  Slippage : %s', 'off' if not args.slippage else f'{args.slippage:g} ticks')
     if args.meta_model:
         logger.info('  Meta     : %s (keep_rate %.2f, threshold %.4f)',
                     os.path.basename(args.meta_model), meta_model.keep_rate,

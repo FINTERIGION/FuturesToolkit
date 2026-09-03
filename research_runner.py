@@ -18,6 +18,7 @@ import logging
 import sys
 
 from datafeed.products import list_products
+from research.objective import DEFAULT_SPARSE_PENALTY
 from strategies import discover_strategies, load_strategy
 
 logger = logging.getLogger('futurestoolkit.research')
@@ -76,6 +77,7 @@ def cmd_optimize(args) -> None:
         lambda_std=args.lambda_std,
         min_trades_per_year=args.min_trades_per_year,
         dd_cap=args.dd_cap,
+        sparse_penalty=args.sparse_penalty,
         param_overrides=overrides or None,
         seed=args.seed,
         probe_samples=args.probe_samples,
@@ -102,14 +104,14 @@ def cmd_holdout(args) -> None:
 # argparse wiring
 # ---------------------------------------------------------------------
 
-def _add_data_args(p, default_symbols=('SA', 'FG', 'CF', 'BU', 'RB', 'HC',
-                                       'C', 'JM', 'V')):
+def _add_data_args(p, default_symbols=('SA', 'FG', 'CF', 'C')):
     p.add_argument('--symbols', nargs='+', default=list(default_symbols),
                     help=f'Products to load (registered: {", ".join(list_products())})')
     p.add_argument('--start', default='2020-01-01')
     p.add_argument('--end', default='2026-12-31')
     p.add_argument('--cash', type=float, default=100_000.0)
-    p.add_argument('--slippage', type=float, default=0.0)
+    p.add_argument('--slippage', type=float, default=0.0,
+                    help='Fill slippage in ticks (per-product tick_size)')
     p.add_argument('--update-data', action='store_true')
 
 
@@ -138,6 +140,12 @@ def _parse_args(argv=None) -> argparse.Namespace:
     p.add_argument('--lambda-std', type=float, default=0.5)
     p.add_argument('--min-trades-per-year', type=float, default=4.0)
     p.add_argument('--dd-cap', type=float, default=0.35)
+    p.add_argument('--sparse-penalty', type=float, default=DEFAULT_SPARSE_PENALTY,
+                    help='How hard to mark down a window that produced fewer trades '
+                         'than --min-trades-per-year expects, at the extreme of no '
+                         'trades at all (default: %(default)s). Raise it toward 1.0 to '
+                         'demand the evidence be there before a configuration counts; '
+                         'lower it to let a promising-but-thin one keep exploring.')
     p.add_argument('--param', action='append',
                     help='Search-space override: name=kind:args, e.g. slow_period=int:20:200')
     p.add_argument('--study-name', default=None)

@@ -11,6 +11,7 @@ fine and means nothing; those are the failures worth spending a test on.
 
 import datetime
 import json
+import logging
 
 import numpy as np
 import pandas as pd
@@ -55,7 +56,7 @@ class _AlwaysAllow:
         return 0.5
 
 
-def _trending_market(n_bars=N_BARS, symbols=('SA', 'FG')):
+def _trending_market(n_bars=N_BARS, symbols=('SA', 'CF')):
     """Two products on a sine-plus-drift path, so DoubleMa actually trades."""
     rng = np.random.default_rng(7)
     products = {}
@@ -287,9 +288,9 @@ def test_feature_row_matches_the_arrays_it_came_from():
     market = _trending_market()
     arrays = build_feature_arrays(_setup_ctx(market))
     i = market.n_bars - 5
-    row = feature_row(arrays, 'FG', i, +1)
+    row = feature_row(arrays, 'CF', i, +1)
     for k, name in enumerate(FEATURE_NAMES):
-        assert row[k] == pytest.approx(arrays[(name, 'FG')][i])
+        assert row[k] == pytest.approx(arrays[(name, 'CF')][i])
 
 
 def test_feature_row_returns_none_inside_warmup():
@@ -493,9 +494,9 @@ def test_threshold_for_selects_the_requested_train_fraction():
             return np.column_stack([1 - p, p])
 
     X = np.zeros((1000, len(FEATURE_NAMES)))
-    thr = threshold_for(_Ramp(), X, 0.65)
+    thr = threshold_for(_Ramp(), X, 0.6)
     kept = (_Ramp().predict_proba(X)[:, 1] >= thr).mean()
-    assert kept == pytest.approx(0.65, abs=0.01)
+    assert kept == pytest.approx(0.6, abs=0.01)
 
 
 # ----------------------------------------------------------------------
@@ -516,14 +517,14 @@ def test_save_load_round_trip_and_sidecar(tmp_path):
     from meta.model import FittedMetaModel, load_model, save_model
 
     est, X = _toy_fit()
-    model = FittedMetaModel(estimator=est, threshold_value=0.42, keep_rate=0.65,
+    model = FittedMetaModel(estimator=est, threshold_value=0.42, keep_rate=0.6,
                             kind='lr', trained_through='2026-09-01')
     path = str(tmp_path / 'm.joblib')
     save_model(model, path, meta={'strategy': 'double_ma', 'params': {}})
 
     back = load_model(path)
     assert back.threshold_value == pytest.approx(0.42)
-    assert back.keep_rate == pytest.approx(0.65)
+    assert back.keep_rate == pytest.approx(0.6)
     assert list(back.feature_names) == list(FEATURE_NAMES)
 
     with open(path + '.json', encoding='utf-8') as f:
@@ -574,7 +575,7 @@ def _report(tmp_path, **over):
 def _holdout_args(report, **over):
     import argparse
 
-    ns = argparse.Namespace(report=report, keep_rate=0.65, kind='rf',
+    ns = argparse.Namespace(report=report, keep_rate=0.6, kind='rf',
                             strategy='double_ma', force=False)
     for k, v in over.items():
         setattr(ns, k, v)
@@ -646,6 +647,68 @@ def test_last_decisions_is_per_bar_not_cumulative():
     market = _trending_market()
     out = _run(market, make_meta_filtered(DoubleMaStrategy, _AlwaysReject()))
     decisions = out['engine'].strategy.last_decisions
-    assert set(decisions).issubset({'SA', 'FG'})
+    assert set(decisions).issubset({'SA', 'CF'})
     for d in decisions.values():
         assert set(d) >= {'net', 'target', 'floor', 'side', 'allowed', 'proba', 'threshold'}
+
+
+def test_load_warns_when_the_model_was_fitted_under_another_sklearn(tmp_path, caplog):
+    """`save_model` has always recorded the fitting version in the sidecar and
+    `load_model` never read it. scikit-learn does not support unpickling an
+    estimator across versions -- it can load and predict differently rather
+    than fail -- and a model file outlives the virtualenv that made it.
+    """
+    from meta.model import FittedMetaModel, load_model, save_model
+
+    est, _ = _toy_fit()
+    model = FittedMetaModel(estimator=est, threshold_value=0.5, keep_rate=1.0, kind='lr')
+    path = str(tmp_path / 'old.joblib')
+    save_model(model, path, meta={})
+
+    with open(path + '.json', encoding='utf-8') as f:
+        sidecar = json.load(f)
+    sidecar['sklearn_version'] = '0.1.ancient'
+    with open(path + '.json', 'w', encoding='utf-8') as f:
+        json.dump(sidecar, f)
+
+    with caplog.at_level(logging.WARNING, logger='meta.model'):
+        back = load_model(path)                      # a warning, not a refusal
+    assert back.threshold_value == pytest.approx(0.5)
+    assert '0.1.ancient' in caplog.text
+
+
+def test_load_refuses_a_model_and_sidecar_that_are_not_a_pair(tmp_path):
+    """The two files are written together and copied around separately, so one
+    can be swapped without the other. An integrity check, not a security one:
+    whoever can write the .joblib can write the .json beside it."""
+    from meta.model import FittedMetaModel, load_model, save_model
+
+    est, _ = _toy_fit()
+    model = FittedMetaModel(estimator=est, threshold_value=0.5, keep_rate=1.0, kind='lr')
+    path = str(tmp_path / 'mismatched.joblib')
+    save_model(model, path, meta={})
+
+    with open(path + '.json', encoding='utf-8') as f:
+        sidecar = json.load(f)
+    sidecar['feature_names'] = list(FEATURE_NAMES)[::-1]
+    with open(path + '.json', 'w', encoding='utf-8') as f:
+        json.dump(sidecar, f)
+
+    with pytest.raises(ValueError, match='not the pair'):
+        load_model(path)
+
+
+def test_load_still_works_without_a_sidecar(tmp_path):
+    """Artifacts predating the sidecar are still usable; the model is
+    self-describing enough on its own."""
+    import os
+
+    from meta.model import FittedMetaModel, load_model, save_model
+
+    est, _ = _toy_fit()
+    model = FittedMetaModel(estimator=est, threshold_value=0.5, keep_rate=1.0, kind='lr')
+    path = str(tmp_path / 'bare.joblib')
+    save_model(model, path, meta={})
+    os.remove(path + '.json')
+
+    assert load_model(path).threshold_value == pytest.approx(0.5)

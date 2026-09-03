@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 from core.market import MarketData
-from runner import run_single_backtest
+from core.backtest import run_single_backtest
 from strategies import load_strategy
 
 __all__ = [
@@ -133,6 +133,9 @@ class SignalRow:
     stop: Optional[float] = None            # armed, resting: check it tomorrow intrabar
     stop_contract: Optional[str] = None
     stop_rule: Optional[dict] = None        # sticky spec; arms into `stop` after a fill
+    take_profit: Optional[float] = None     # the bracket's other leg, same lifecycle
+    take_profit_contract: Optional[str] = None
+    take_profit_rule: Optional[dict] = None
     primary_side: Optional[int] = None
     proba: Optional[float] = None
     threshold: Optional[float] = None
@@ -197,6 +200,9 @@ def _row_dict(row: SignalRow, *, meta: bool) -> dict:
         'current_simulated': row.current_simulated, 'target': row.target,
         'delta': row.delta, 'action': row.action, 'tradable': row.tradable,
         'stop': row.stop, 'stop_contract': row.stop_contract, 'stop_rule': row.stop_rule,
+        'take_profit': row.take_profit,
+        'take_profit_contract': row.take_profit_contract,
+        'take_profit_rule': row.take_profit_rule,
     }
     if meta:
         d.update({name: getattr(row, name) for name in _META_FIELDS})
@@ -234,10 +240,11 @@ def compute_signal(market: MarketData, spec: SignalSpec) -> SignalReport:
         net = int(engine.broker.net_position(sym))
         delta = int(pending.get(sym, 0))
         d = decisions.get(sym) or {}
-        # `live_stop` survives the run: a stop armed at the last OPEN and not
-        # hit during that bar is precisely the order that should be resting
-        # in the real account tomorrow.
+        # `live_stop` / `live_tp` survive the run: a bracket armed at the last
+        # OPEN and not hit during that bar is precisely the pair of orders that
+        # should be resting in the real account tomorrow.
         armed = engine.live_stop.get(sym) or {}
+        armed_tp = engine.live_tp.get(sym) or {}
         rows.append(SignalRow(
             symbol=sym,
             contract=panel.active_contract(last) if panel else '',
@@ -248,6 +255,9 @@ def compute_signal(market: MarketData, spec: SignalSpec) -> SignalReport:
             stop=armed.get('price'),
             stop_contract=armed.get('contract'),
             stop_rule=engine.stop_spec.get(sym),
+            take_profit=armed_tp.get('price'),
+            take_profit_contract=armed_tp.get('contract'),
+            take_profit_rule=engine.tp_spec.get(sym),
             primary_side=d.get('side'),
             proba=d.get('proba'),
             threshold=d.get('threshold'),

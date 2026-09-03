@@ -43,7 +43,7 @@ class _FakeModel:
         return 0.5
 
 
-def _trending_market(n_bars=N_BARS, symbols=('SA', 'FG')):
+def _trending_market(n_bars=N_BARS, symbols=('SA', 'CF')):
     rng = np.random.default_rng(7)
     products = {}
     for k, sym in enumerate(symbols):
@@ -70,7 +70,7 @@ def _trending_market(n_bars=N_BARS, symbols=('SA', 'FG')):
 def _spec(cls=DoubleMaStrategy, **kw):
     return SignalSpec(
         strategy_cls=cls, params=kw.pop('params', {}),
-        symbols=list(kw.pop('symbols', ['SA', 'FG'])),
+        symbols=list(kw.pop('symbols', ['SA', 'CF'])),
         cash=kw.pop('cash', 200_000.0), slippage=0.0, **kw,
     )
 
@@ -95,7 +95,7 @@ def test_a_plain_strategy_needs_no_model():
     """The point of the split: `strategies/` works without meta-labeling."""
     report = compute_signal(_trending_market(), _spec())
     assert not report.is_meta
-    assert {r.symbol for r in report.rows} == {'SA', 'FG'}
+    assert {r.symbol for r in report.rows} == {'SA', 'CF'}
     assert all(r.proba is None and r.verdict is None for r in report.rows)
     # DoubleMa is always in the market once warm, so it has a live target.
     assert all(r.target != 0 for r in report.rows)
@@ -103,7 +103,7 @@ def test_a_plain_strategy_needs_no_model():
 
 def test_rows_carry_the_execution_contract():
     report = compute_signal(_trending_market(), _spec())
-    assert [r.contract for r in report.rows] == ['SA509', 'FG509']
+    assert [r.contract for r in report.rows] == ['SA509', 'CF509']
     assert all(r.tradable for r in report.rows)
 
 
@@ -145,6 +145,31 @@ def test_a_resting_stop_is_reported():
     row = report.rows[0]
     assert row.stop is not None and row.stop_contract == 'SA509'
     assert 'stop' in render(report).lower()
+
+
+def test_a_resting_take_profit_is_reported():
+    """Same for the bracket's other leg: both levels have to reach the desk."""
+
+    class _BracketedLong(Strategy):
+        params = {'lots': 1}
+
+        def setup(self, ctx):
+            for sym in ctx.symbols:
+                ctx.add_indicator('c', sym, ctx.close(sym))
+
+        def on_bar(self, ctx):
+            for sym in ctx.symbols:
+                if ctx.can_trade(sym):
+                    ctx.set_target(sym, 1)
+                    ctx.set_stop(sym, distance=5.0)
+                    ctx.set_take_profit(sym, distance=20.0)
+
+    report = compute_signal(_trending_market(), _spec(cls=_BracketedLong))
+    row = report.rows[0]
+    assert row.take_profit is not None and row.take_profit_contract == 'SA509'
+    assert row.take_profit > row.stop        # long: the target sits above the stop
+    assert 'take profit' in render(report).lower()
+    assert report.to_dict()['signals'][0]['take_profit'] == row.take_profit
 
 
 # ----------------------------------------------------------------------
@@ -208,7 +233,7 @@ def test_json_is_named_per_strategy_and_date(tmp_path):
     payload = json.loads(open(path, encoding='utf-8').read())
     assert payload['execute_at'] == 'next session open'
     assert 'model' not in payload
-    assert [s['symbol'] for s in payload['signals']] == ['SA', 'FG']
+    assert [s['symbol'] for s in payload['signals']] == ['SA', 'CF']
     assert all('proba' not in s for s in payload['signals'])
 
 
@@ -239,12 +264,12 @@ def test_strategy_runs_resolve_params_and_universe():
     import live_runner
 
     args = live_runner._parse_args(
-        ['--strategy', 'double_ma', '--symbols', 'SA', 'FG', '--param', 'fast_period=3'],
+        ['--strategy', 'double_ma', '--symbols', 'SA', 'CF', '--param', 'fast_period=3'],
     )
     spec = live_runner.build_spec(args)
     assert spec.strategy_cls is DoubleMaStrategy
     assert spec.params == {'fast_period': 3}
-    assert spec.symbols == ['SA', 'FG']
+    assert spec.symbols == ['SA', 'CF']
     assert spec.effective_params['slow_period'] == 20   # class default merged under
     assert not spec.is_meta
 

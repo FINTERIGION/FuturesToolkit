@@ -444,8 +444,8 @@ class _CzceSource(ExchangeSource):
 class _DailyFileSource(ExchangeSource):
     """One cached payload per trading day, shared by every product on the venue.
 
-    The payloads are keyed by date and hold every product, so syncing BU then RB
-    then HC downloads each day exactly once -- the 2nd and 3rd products are pure
+    The payloads are keyed by date and hold every product, so syncing RB then AG
+    then C downloads each day exactly once -- the 2nd and 3rd products are pure
     cache hits. Neither exchange publishes a holiday calendar, so we build one:
     weekends are skipped without a request, and any other date that comes back
     empty is recorded in ``_calendar.json`` and never requested again.

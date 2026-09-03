@@ -12,7 +12,7 @@ import logging
 from core.market import MarketData, build_market_data, slice_market
 from datafeed.data_manager import DataManager
 from datafeed.products import require_products
-from runner import run_single_backtest
+from core.backtest import run_single_backtest
 from research.splits import Window
 
 logger = logging.getLogger(__name__)
@@ -65,7 +65,10 @@ def run_window(
     not against ``window.start``: the two coincide whenever ``pad`` covers
     the strategy's warmup (the intended case), but when it does not the
     engine drops the un-tradeable head bars from the curve as well, leaving
-    the list correspondingly shorter.
+    the list correspondingly shorter. The *tail* can be short too: a trial
+    whose account blows up stops on that bar, so its window ends early and its
+    metrics cover only what it survived -- which is the honest score for a
+    parameter set that cannot be funded, not a reason to discard the trial.
     """
     lo = max(0, window.start - pad)
     sliced = slice_market(market, lo, window.end)

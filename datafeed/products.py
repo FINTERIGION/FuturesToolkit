@@ -3,6 +3,12 @@
 ``exchange`` selects the download adapter in ``datafeed.sources``; every other
 key here is venue-agnostic.
 
+``tick_size`` is the product's minimum price increment, in the same units the
+price series is quoted in. It is what makes a slippage setting portable: the
+engine charges ``slippage × tick_size`` per fill, so ``--slippage 1`` is one
+tick everywhere rather than one price point -- which would be a rounding error
+on gold (0.02) and a 10-point gap on copper.
+
 Commission is per product, one of:
   commission_rate      fraction of notional (price × lots × multiplier)
   commission_per_lot   fixed CNY per lot
@@ -15,11 +21,19 @@ A contract is rolled out of on the first calendar day of the month
 ``roll_lead_months`` before its delivery month -- the 05 contract is dropped
 on April 1st. Both keys are optional; omitting them uses the module defaults
 below, so a product only needs to declare them when its cycle differs -- as
-SHFE rebar (01/05/10) and bitumen (06/09/12) do.
+SHFE rebar (01/05/10), silver (even months), and the non-ferrous metals (every
+month) do.
 
 Contract codes are normalised to UPPERCASE + 4-digit YYMM regardless of venue
-(``RB2601``, ``C2601``), which is what ``parse_product`` and
+(``RB2610``, ``C2601``), which is what ``parse_product`` and
 ``roll_calendar.parse_contract_expiry`` expect.
+
+This registry is a *catalog* of what the toolkit can fetch and cost correctly;
+the universe actually traded is each runner's ``DEFAULT_SYMBOLS``, a subset --
+most of what is registered here sits out of the traded set. Doing so costs
+nothing: SHFE and DCE payloads are per-day and shared, so an extra product on
+those venues is a cache hit, which keeps its data fresh and makes switching it
+into the traded set a one-word change.
 
 The numbers below are a starting point, not a live feed: exchanges revise
 multipliers, margin floors, and fee schedules by notice, and a broker's margin
@@ -37,15 +51,11 @@ _CONTRACT_RE = re.compile(r'^([A-Za-z]+)(\d+)$')
 _CONTRACT_DECADE_RE = re.compile(r'^([A-Za-z]+)(\d+)_(\d{6})$')
 _WEIGHTED_SUFFIX = '_weighted'
 
-# The 01/05/09 cycle is the most common one across these venues -- every CZCE
-# product here plus DCE corn, coking coal, and PVC -- so it is the fallback for
-# a product that declares nothing. The standing convention is to leave a
-# contract one month before delivery. Neither is universal; see the entries
-# below that override them.
 DEFAULT_MAIN_MONTHS = (1, 5, 9)
 DEFAULT_ROLL_LEAD_MONTHS = 1
 
 PRODUCTS: Dict[str, dict] = {
+    # -- CZCE ---------------------------------------------------------------
     'SA': {
         'exchange': 'CZCE',
         'name': 'soda_ash',
@@ -53,18 +63,9 @@ PRODUCTS: Dict[str, dict] = {
         'start_year': 2019,
         'main_months': (1, 5, 9),
         'multiplier': 20,
+        'tick_size': 1.0,
         'margin_rate': 0.11,
         'commission_rate': 0.0001,
-    },
-    'FG': {
-        'exchange': 'CZCE',
-        'name': 'glass',
-        'name_zh': '玻璃',
-        'start_year': 2015,
-        'main_months': (1, 5, 9),
-        'multiplier': 20,
-        'margin_rate': 0.12,
-        'commission_per_lot': 2.0,
     },
     'CF': {
         'exchange': 'CZCE',
@@ -73,18 +74,98 @@ PRODUCTS: Dict[str, dict] = {
         'start_year': 2015,
         'main_months': (1, 5, 9),
         'multiplier': 5,
+        'tick_size': 5.0,
         'margin_rate': 0.10,
         'commission_per_lot': 4.3,
     },
-    'BU': {
-        'exchange': 'SHFE',
-        'name': 'bitumen',
-        'name_zh': '沥青',
+    'FG': {
+        'exchange': 'CZCE',
+        'name': 'glass',
+        'name_zh': '玻璃',
         'start_year': 2015,
-        'main_months': (6, 9, 12),
+        'main_months': (1, 5, 9),
+        'multiplier': 20,
+        'tick_size': 1.0,
+        'margin_rate': 0.12,
+        'commission_per_lot': 2.0,
+    },
+    'SR': {
+        'exchange': 'CZCE',
+        'name': 'white_sugar',
+        'name_zh': '白糖',
+        'start_year': 2015,
+        'main_months': (1, 5, 9),
         'multiplier': 10,
-        'margin_rate': 0.16,
+        'tick_size': 1.0,
+        'margin_rate': 0.09,
+        'commission_per_lot': 2.0,
+    },
+    # -- SHFE ---------------------------------------------------------------
+    'AG': {
+        'exchange': 'SHFE',
+        'name': 'silver',
+        'name_zh': '沪银',
+        'start_year': 2015,
+        'main_months': (2, 4, 6, 8, 10, 12),
+        'multiplier': 15,
+        'tick_size': 1.0,
+        'margin_rate': 0.25,
+        'commission_rate': 0.00001,
+    },
+    'AU': {
+        'exchange': 'SHFE',
+        'name': 'gold',
+        'name_zh': '沪金',
+        'start_year': 2015,
+        'main_months': (2, 4, 6, 8, 10, 12),
+        'multiplier': 1000,
+        'tick_size': 0.02,
+        'margin_rate': 0.19,
+        'commission_per_lot': 10.0,
+    },
+    'CU': {
+        'exchange': 'SHFE',
+        'name': 'copper',
+        'name_zh': '沪铜',
+        'start_year': 2015,
+        'main_months': (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12),
+        'multiplier': 5,
+        'tick_size': 10.0,
+        'margin_rate': 0.14,
         'commission_rate': 0.00005,
+    },
+    'AL': {
+        'exchange': 'SHFE',
+        'name': 'aluminium',
+        'name_zh': '沪铝',
+        'start_year': 2015,
+        'main_months': (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12),
+        'multiplier': 5,
+        'tick_size': 5.0,
+        'margin_rate': 0.14,
+        'commission_per_lot': 3.0,
+    },
+    'ZN': {
+        'exchange': 'SHFE',
+        'name': 'zinc',
+        'name_zh': '沪锌',
+        'start_year': 2015,
+        'main_months': (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12),
+        'multiplier': 5,
+        'tick_size': 5.0,
+        'margin_rate': 0.15,
+        'commission_per_lot': 3.0,
+    },
+    'SN': {
+        'exchange': 'SHFE',
+        'name': 'tin',
+        'name_zh': '沪锡',
+        'start_year': 2021,
+        'main_months': (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12),
+        'multiplier': 1,
+        'tick_size': 10.0,
+        'margin_rate': 0.18,
+        'commission_per_lot': 3.0,
     },
     'RB': {
         'exchange': 'SHFE',
@@ -93,6 +174,7 @@ PRODUCTS: Dict[str, dict] = {
         'start_year': 2015,
         'main_months': (1, 5, 10),
         'multiplier': 10,
+        'tick_size': 1.0,
         'margin_rate': 0.10,
         'commission_rate': 0.0001,
     },
@@ -103,9 +185,22 @@ PRODUCTS: Dict[str, dict] = {
         'start_year': 2015,
         'main_months': (1, 5, 10),
         'multiplier': 10,
+        'tick_size': 1.0,
         'margin_rate': 0.10,
         'commission_rate': 0.0001,
     },
+    'RU': {
+        'exchange': 'SHFE',
+        'name': 'rubber',
+        'name_zh': '橡胶',
+        'start_year': 2015,
+        'main_months': (1, 5, 9),
+        'multiplier': 10,
+        'tick_size': 5.0,
+        'margin_rate': 0.12,
+        'commission_per_lot': 3.0,
+    },
+    # -- DCE ----------------------------------------------------------------
     'C': {
         'exchange': 'DCE',
         'name': 'corn',
@@ -113,6 +208,7 @@ PRODUCTS: Dict[str, dict] = {
         'start_year': 2015,
         'main_months': (1, 5, 9),
         'multiplier': 10,
+        'tick_size': 1.0,
         'margin_rate': 0.11,
         'commission_per_lot': 1.2,
     },
@@ -123,18 +219,20 @@ PRODUCTS: Dict[str, dict] = {
         'start_year': 2015,
         'main_months': (1, 5, 9),
         'multiplier': 60,
+        'tick_size': 0.5,
         'margin_rate': 0.17,
         'commission_rate': 0.0001,
     },
-    'V': {
+    'LH': {
         'exchange': 'DCE',
-        'name': 'pvc',
-        'name_zh': 'PVC',
-        'start_year': 2015,
-        'main_months': (1, 5, 9),
-        'multiplier': 5,
-        'margin_rate': 0.14,
-        'commission_per_lot': 1.0,
+        'name': 'live_hog',
+        'name_zh': '生猪',
+        'start_year': 2021,
+        'main_months': (1, 3, 5, 7, 9, 11),
+        'multiplier': 16,
+        'tick_size': 5.0,
+        'margin_rate': 0.11,
+        'commission_rate': 0.0002,
     },
 }
 
@@ -176,6 +274,15 @@ def product_costs(symbol: str) -> dict:
         'commission_rate': rate,
         'commission_per_lot': per_lot,
     }
+
+
+def tick_size(symbol: str) -> float:
+    """Return the product's minimum price increment.
+
+    Slippage is quoted in ticks, so this is the multiplier the engine applies
+    to its ``slippage`` setting -- see ``Engine._slipped``.
+    """
+    return float(get_product(symbol)['tick_size'])
 
 
 def normalize_main_months(months) -> Tuple[int, ...]:
@@ -223,10 +330,18 @@ def weighted_feed_name(symbol: str) -> str:
 
 
 def parse_product(code) -> Optional[str]:
-    """Extract a product code from a feed name or contract code.
+    """Extract a **registered** product code from a feed name or contract code.
 
-    ``SA2505`` -> ``SA``, ``FG_weighted`` -> ``FG``, ``CF`` -> ``CF``.
-    Decade-disambiguated feeds such as ``FG609_201609`` -> ``FG``.
+    ``SA2505`` -> ``SA``, ``CF_weighted`` -> ``CF``, ``CF`` -> ``CF``.
+    Decade-disambiguated feeds such as ``SA609_201609`` -> ``SA``.
+
+    ``None`` for anything this registry does not carry, including a string
+    that is shaped like a contract code but names nothing here (``XX2505``).
+    Returning the letter run regardless, as this used to, produced a plausible
+    code that every costing and rolling helper then rejected -- so the failure
+    surfaced as a ``KeyError`` inside ``product_costs`` somewhere downstream
+    rather than at the point the unknown string came in. Callers already read
+    ``None`` as "not a product"; this just makes it mean that consistently.
     """
     if code is None:
         return None
@@ -238,11 +353,13 @@ def parse_product(code) -> Optional[str]:
         return upper
     if upper.endswith('_WEIGHTED'):
         prefix = upper[: -len('_WEIGHTED')]
-        return prefix or None
+        return prefix if prefix in PRODUCTS else None
     decade = _CONTRACT_DECADE_RE.match(text)
     if decade:
-        return decade.group(1).upper()
+        prefix = decade.group(1).upper()
+        return prefix if prefix in PRODUCTS else None
     match = _CONTRACT_RE.match(text)
     if match:
-        return match.group(1).upper()
+        prefix = match.group(1).upper()
+        return prefix if prefix in PRODUCTS else None
     return None

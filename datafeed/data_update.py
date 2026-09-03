@@ -7,7 +7,7 @@ the freshness bookkeeping that lets a re-run skip a needless rebuild.
 
 Usage (from the repo root):
   python -m datafeed.data_update              # incremental: all registered products
-  python -m datafeed.data_update FG CF        # selected products only
+  python -m datafeed.data_update SA CF        # selected products only
   python -m datafeed.data_update --force      # re-download everything
   python -m datafeed.data_update --rebuild-only
 """

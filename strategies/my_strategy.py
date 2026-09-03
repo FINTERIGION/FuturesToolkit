@@ -32,6 +32,7 @@ class MyStrategy(Strategy):
       ctx.set_target(sym, lots)     target net position; idempotent
       ctx.buy(sym, lots) / sell(sym, lots) / close(sym)
       ctx.set_stop(sym, price=None, distance=None) / cancel_stop(sym)
+      ctx.set_take_profit(sym, price=None, distance=None) / cancel_take_profit(sym)
       ctx.size_for_risk(sym, stop_distance, risk_pct)
 
     Multi-product sketch (one independent signal per product)::

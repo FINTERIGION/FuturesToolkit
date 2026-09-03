@@ -39,7 +39,7 @@ from live.signal import SignalSpec, compute_signal, spec_from_model
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_RESULTS_DIR = os.path.join(ROOT_DIR, 'results', 'live')
-DEFAULT_SYMBOLS = ['SA', 'FG', 'CF', 'BU', 'RB', 'HC', 'C', 'JM', 'V']
+DEFAULT_SYMBOLS = ['SA', 'FG', 'CF', 'C']
 DEFAULT_START = '2015-01-01'
 DEFAULT_END = '2026-12-31'
 DEFAULT_CASH = 1_000_000.0
@@ -104,7 +104,8 @@ def _parse_args(argv=None) -> argparse.Namespace:
                         help='Set this to your REAL account equity for strategies that '
                              f'size off equity (default: the training cash with --model, '
                              f'else {DEFAULT_CASH:,.0f}).')
-    parser.add_argument('--slippage', type=float, default=None)
+    parser.add_argument('--slippage', type=float, default=None,
+                        help='Fill slippage in ticks; default is the training run\'s.')
     parser.add_argument('--lots', type=int, default=None, help='--strategy only.')
     parser.add_argument('--params-from', default=None,
                         help="--strategy only: params from an optimize '*_best.json'.")

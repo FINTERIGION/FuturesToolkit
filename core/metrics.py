@@ -29,6 +29,8 @@ def compute_metrics(
     trade_logs: List[dict],
     initial_cash: float,
     liquidation_count: int = 0,
+    rejected_count: int = 0,
+    blown_up: bool = False,
     risk_free_rate: float = 0.03,
 ) -> dict:
     if not equity_records:
@@ -110,6 +112,7 @@ def compute_metrics(
     turnover = _turnover(trade_logs, equities)
     capital_exposure = _capital_exposure(equity_records)
     by_symbol = _per_symbol_breakdown(trade_logs)
+    by_exit_reason = _exit_reason_breakdown(trade_logs)
 
     # Books check: every yuan the equity curve moved must be accounted for by
     # a logged trade. Fails if the equity curve picks up a term the trade log
@@ -150,8 +153,13 @@ def compute_metrics(
         'n_winning': len(winning),
         'n_losing': len(losing),
         'n_forced_liquidations': liquidation_count,
+        'n_rejected_orders': rejected_count,
+        # True when the run stopped early on an insolvent account: every metric
+        # here then describes a truncated window, not the requested one.
+        'blown_up': blown_up,
         'reconciliation_drift': round(drift, 4),
         'by_symbol': by_symbol,
+        'by_exit_reason': by_exit_reason,
     }
 
 
@@ -190,6 +198,32 @@ def _turnover(trade_logs: List[dict], equities: np.ndarray) -> float:
             continue
         total_notional += (t['open_price'] + t['close_price']) * t['size'] * mult
     return total_notional / avg_equity
+
+
+def _exit_reason_breakdown(trade_logs: List[dict]) -> Dict[str, dict]:
+    """How each kind of exit paid: the dial for tuning a stop/target bracket.
+
+    A bracket's two levels trade win rate against expectancy, and the totals
+    hide that -- widening a target lifts the average winner and thins the
+    winners at the same time, and only the split by exit says which of the two
+    moved. ``share`` is the percentage of all trades that left this way.
+    """
+    by_reason: Dict[str, List[dict]] = {}
+    for t in trade_logs:
+        by_reason.setdefault(t.get('exit_reason') or 'unknown', []).append(t)
+    total = len(trade_logs)
+    out = {}
+    for reason, trades in by_reason.items():
+        n = len(trades)
+        wins = [t for t in trades if t['net_pnl'] > 0]
+        out[reason] = {
+            'n_trades': n,
+            'share': round(n / total * 100, 4) if total else 0.0,
+            'win_rate': round(len(wins) / n * 100, 4) if n else 0.0,
+            'net_pnl': round(sum(t['net_pnl'] for t in trades), 4),
+            'expectancy': round(sum(t['net_pnl'] for t in trades) / n, 4) if n else 0.0,
+        }
+    return out
 
 
 def _per_symbol_breakdown(trade_logs: List[dict]) -> Dict[str, dict]:

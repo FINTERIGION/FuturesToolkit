@@ -27,7 +27,7 @@ TRADE_LOG_FIELDS = [
     'contract', 'contracts', 'n_rolls',
     'open_price', 'close_price', 'size',
     'gross_pnl', 'commission', 'net_pnl', 'margin_used',
-    'open_at_end', 'forced', 'open_bar', 'close_bar',
+    'open_at_end', 'forced', 'exit_reason', 'open_bar', 'close_bar',
 ]
 
 
@@ -72,6 +72,10 @@ class Ledger:
             row['exit_qty'] += close_qty
             row['exit_notional'] += close_qty * fill.price
             row['gross_pnl'] += fill.realized_pnl
+            # Overwritten by every reducing fill, so what survives is the
+            # reason of the one that flattened the position -- a scale-out
+            # partway through does not get to name the trade's exit.
+            row['exit_reason'] = fill.reason.value
             row['commission'] += close_comm
             row['size'] = max(row['size'], abs(prev))
             costs = product_costs(symbol)
@@ -106,21 +110,38 @@ class Ledger:
                 row['contracts'].append(fill.contract)
 
     def finish(self, broker: Broker, last_date: Date, last_bar: Optional[int] = None) -> None:
-        """Close out rows still open at the end of the run, at their last mark."""
-        for (symbol, contract), pos in list(broker.positions.items()):
+        """Close out rows still open at the end of the run, at their last mark.
+
+        Every contract a symbol still holds is folded into that symbol's one
+        open row *before* the row is finalized. A symbol should only ever hold
+        one (``Engine._maybe_roll`` keeps a product on a single leg), but the
+        loop used to finalize and pop on the first contract it saw, so a stray
+        second leg's P&L silently left the trade log -- breaking the very
+        invariant this module exists to hold, and surfacing three layers away
+        as ``compute_metrics``' reconciliation warning. Folding means a leg
+        that should not exist shows up as P&L rather than as a discrepancy.
+        """
+        legs: Dict[str, List[tuple]] = {}
+        for (symbol, contract), pos in broker.positions.items():
+            if pos.size:
+                legs.setdefault(symbol, []).append((contract, pos))
+
+        for symbol, held in legs.items():
             row = self._open.get(symbol)
-            if row is None or pos.size == 0:
+            if row is None:
                 continue
             multiplier = product_costs(symbol)['multiplier']
-            qty = abs(pos.size)
-            row['exit_qty'] += qty
-            row['exit_notional'] += qty * pos.last_mark
-            row['gross_pnl'] += (pos.last_mark - pos.avg_entry) * pos.size * multiplier
+            for contract, pos in held:
+                qty = abs(pos.size)
+                row['exit_qty'] += qty
+                row['exit_notional'] += qty * pos.last_mark
+                row['gross_pnl'] += (pos.last_mark - pos.avg_entry) * pos.size * multiplier
+                if contract not in row['contracts']:
+                    row['contracts'].append(contract)
             row['open_at_end'] = 1
+            row['exit_reason'] = 'end_of_run'
             row['close_date'] = last_date
             row['close_bar'] = last_bar
-            if contract not in row['contracts']:
-                row['contracts'].append(contract)
             self._finalize(symbol, row)
             self._open.pop(symbol, None)
 
@@ -145,6 +166,7 @@ class Ledger:
             'size': 0, 'margin_used': 0.0,
             'gross_pnl': 0.0, 'commission': 0.0,
             'open_at_end': 0, 'forced': 0,
+            'exit_reason': None,
         }
 
     def _finalize(self, symbol: str, row: dict) -> None:
@@ -170,6 +192,7 @@ class Ledger:
             'margin_used': round(row['margin_used'], 4),
             'open_at_end': row['open_at_end'],
             'forced': row['forced'],
+            'exit_reason': row['exit_reason'],
         })
 
     def reconciliation_drift(self, final_equity: float, initial_cash: float) -> float:

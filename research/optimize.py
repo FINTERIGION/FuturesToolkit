@@ -30,7 +30,9 @@ from optuna.trial import TrialState
 
 from core.params import Categorical, Float, Int
 from strategies import load_strategy, name_for
-from research.objective import fold_objective, score, window_years
+from research.objective import (
+    DEFAULT_SPARSE_PENALTY, fold_objective, score, window_years,
+)
 from research.overfit import deflated_sharpe_ratio, is_oos_decay, pbo_cscv, plateau_check
 from research.runner_api import load_market, run_window
 from research.space import check_constraints, resolve_space, suggest
@@ -92,6 +94,7 @@ def run_study(
     lambda_std: float = 0.5,
     min_trades_per_year: float = 4.0,
     dd_cap: float = 0.35,
+    sparse_penalty: float = DEFAULT_SPARSE_PENALTY,
     param_overrides: dict = None,
     seed: int = 42,
     probe_samples: int = 20,
@@ -145,25 +148,45 @@ def run_study(
             train_scores.append(score(
                 train_out['metrics'], window_years=window_years(train_w.n_bars),
                 min_trades_per_year=min_trades_per_year, dd_cap=dd_cap,
+                sparse_penalty=sparse_penalty,
             ))
             valid_scores.append(score(
                 valid_out['metrics'], window_years=window_years(valid_w.n_bars),
                 min_trades_per_year=min_trades_per_year, dd_cap=dd_cap,
+                sparse_penalty=sparse_penalty,
             ))
             fold_metrics.append({'train': train_out['metrics'], 'valid': valid_out['metrics']})
 
         full_out = run_window(market, strategy_cls, params, full_window, cash=cash, slippage=slippage, pad=pad)
-        returns = np.array(
-            [r['daily_return'] for r in full_out['result']['equity_records']], dtype='float64',
-        )
-        if len(returns) < full_window.n_bars:
-            returns = np.concatenate([np.zeros(full_window.n_bars - len(returns)), returns])
+        # Place the curve at the bar it actually starts on, and leave whatever
+        # it does not cover at zero. A run can come up short at either end and
+        # for opposite reasons: short at the *head* means the indicators needed
+        # more pad than they got, short at the *tail* means the account blew up
+        # and the run stopped there. Zero-filling the head unconditionally --
+        # which is what this did -- shifted every blown-up trial's return
+        # series forward in time, and `pbo_cscv` compares trials block by block
+        # along exactly that axis, so a shifted trial was scored against the
+        # wrong period in every single split. `effective_start` is absolute, in
+        # `market`'s own bar numbering, so the offset needs no guessing.
+        records = full_out['result']['equity_records']
+        returns = np.zeros(full_window.n_bars, dtype='float64')
+        if records:
+            offset = max(0, full_out['effective_start'] - full_window.start)
+            values = np.array([r['daily_return'] for r in records], dtype='float64')
+            values = values[: full_window.n_bars - offset]
+            returns[offset: offset + len(values)] = values
         trial_returns[trial.number] = returns
 
         trial.set_user_attr('params', params)
         trial.set_user_attr('train_scores', train_scores)
         trial.set_user_attr('valid_scores', valid_scores)
         trial.set_user_attr('fold_metrics', fold_metrics)
+        # A trial that ran out of capital has no out-of-sample stretch at all:
+        # the zeros standing in for the bars it never traded read to
+        # `_period_sharpe` as a calm patch rather than a dead account, which
+        # flatters its rank in every block after it died. Recorded so the
+        # report can say how much of the PBO/DSR sample is in that state.
+        trial.set_user_attr('blown_up', bool(full_out['result']['blown_up']))
 
         return fold_objective(valid_scores, lambda_std=lambda_std)
 
@@ -201,6 +224,32 @@ def run_study(
             best_trial.number, best_trial.value, storage,
         )
 
+    # The search's own answer can be "nothing here trades", and that has to
+    # read as a finding rather than as a result. Without this the degenerate
+    # configuration comes back as `best_params` with diagnostics computed on a
+    # flat equity curve, which do not look bad -- they look unremarkable.
+    best_valid_trades = sum(
+        f['valid'].get('n_trades', 0) for f in best_trial.user_attrs['fold_metrics']
+    )
+    if best_valid_trades == 0:
+        logger.warning(
+            "Best trial #%d never opened a position in any validation fold. That is "
+            "not a tuned parameter set -- it is the search reporting that nothing in "
+            "this space traded. PBO and DSR below are computed on a flat curve and "
+            "will read as unremarkable rather than as bad. Widen the space, lengthen "
+            "the window, or read this as 'no edge found'.", best_trial.number,
+        )
+
+    n_blown_up = sum(1 for t in completed if t.user_attrs.get('blown_up'))
+    if n_blown_up:
+        logger.warning(
+            "%d of %d diagnosed trial(s) blew up mid-window. The bars they never "
+            "traded stand in as zero returns, which reads as a calm stretch rather "
+            "than a dead account, so PBO and DSR understate how bad those trials "
+            "were. Treat both as optimistic while this count is high.",
+            n_blown_up, len(completed),
+        )
+
     returns_matrix = np.stack([trial_returns[t.number] for t in completed], axis=0)
 
     def _evaluate(candidate_params: dict) -> float:
@@ -210,6 +259,7 @@ def run_study(
             valid_scores.append(score(
                 valid_out['metrics'], window_years=window_years(valid_w.n_bars),
                 min_trades_per_year=min_trades_per_year, dd_cap=dd_cap,
+                sparse_penalty=sparse_penalty,
             ))
         return fold_objective(valid_scores, lambda_std=lambda_std)
 
@@ -235,6 +285,15 @@ def run_study(
         'n_trials_completed': len(completed),
         'n_folds': n_folds,
         'embargo': embargo,
+        # Stored so `evaluate_holdout` scores on the same scale the search
+        # ranked on. It used to hardcode the defaults, which silently put the
+        # holdout on a different objective from every fold whenever these were
+        # tuned from the CLI.
+        'min_trades_per_year': min_trades_per_year,
+        'dd_cap': dd_cap,
+        'sparse_penalty': sparse_penalty,
+        'n_trials_blown_up': n_blown_up,
+        'best_valid_trades': best_valid_trades,
         'reserve_bars': reserve_bars,
         'holdout_frac': holdout_frac,
         'holdout_window': {'start': holdout.start, 'end': holdout.end},
@@ -305,7 +364,9 @@ def evaluate_holdout(report_path: str, *, force: bool = False) -> dict:
     )
     holdout_score = score(
         out['metrics'], window_years=window_years(holdout.n_bars),
-        min_trades_per_year=4.0, dd_cap=0.35,
+        min_trades_per_year=report.get('min_trades_per_year', 4.0),
+        dd_cap=report.get('dd_cap', 0.35),
+        sparse_penalty=report.get('sparse_penalty', DEFAULT_SPARSE_PENALTY),
     )
 
     report['holdout_evaluated'] = True

@@ -169,7 +169,7 @@ def threshold_for(estimator, X_train: np.ndarray, keep_rate: float) -> float:
 
     Chosen on train only, never on the validation window it is then applied
     to. That makes ``keep_rate`` -- a round number fixed in advance, reported
-    as a curve over {1.0, 0.8, 0.65, 0.5} -- the single human constant in the
+    as a curve over {1.0, 0.8, 0.7, 0.6, 0.5} -- the single human constant in the
     procedure, rather than a threshold tuned against the very curve it is
     supposed to be judged by. ``keep_rate=1.0`` returns a cut below every
     training probability, i.e. an exact no-op, which is what makes it usable
@@ -222,6 +222,11 @@ def load_model(path: str) -> FittedMetaModel:
     nonsense. Checking the stored names against the live ``FEATURE_NAMES``
     turns that into an error at load time, which is the only place it is
     cheap to catch.
+
+    **A model artifact is executable code.** ``joblib.load`` unpickles, and
+    unpickling runs whatever the file says to run -- before any check below
+    gets a chance. Load only artifacts this toolkit produced; see
+    docs/meta-labeling.md.
     """
     import joblib
 
@@ -234,4 +239,58 @@ def load_model(path: str) -> FittedMetaModel:
             f'  current: {list(FEATURE_NAMES)}\n'
             'Re-run `meta_runner.py fit` against the current meta.features.'
         )
+    _check_sidecar(path, model)
     return model
+
+
+def _check_sidecar(path: str, model) -> None:
+    """Cross-check the artifact against the sidecar ``save_model`` wrote.
+
+    Two things the pickle alone cannot tell you:
+
+    * **Which sklearn fitted it.** scikit-learn does not support unpickling an
+      estimator across versions -- it does not necessarily fail, it can load
+      and behave differently -- and a model file outlives the virtualenv that
+      produced it. The version was already being recorded here and never read.
+      A warning rather than an error: a patch bump is almost always harmless,
+      and refusing to load would be the wrong trade for a research tool.
+    * **Whether the two files still belong together.** They are written as a
+      pair and copied around separately, so one can be replaced without the
+      other. This is an integrity check and nothing more -- anyone able to
+      write the ``.joblib`` can write the ``.json`` beside it, so it catches
+      mistakes, never tampering.
+
+    A missing sidecar is not an error: older artifacts predate it, and the
+    model itself is still self-describing enough to use.
+    """
+    sidecar_path = path + '.json'
+    if not os.path.exists(sidecar_path):
+        logger.debug('%s has no sidecar; skipping provenance checks.', path)
+        return
+    try:
+        with open(sidecar_path, encoding='utf-8') as f:
+            sidecar = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning('Could not read %s (%s); skipping provenance checks.', sidecar_path, exc)
+        return
+
+    import sklearn
+
+    trained_with = sidecar.get('sklearn_version')
+    if trained_with and trained_with != sklearn.__version__:
+        logger.warning(
+            '%s was fitted under scikit-learn %s but this environment runs %s. '
+            'Unpickling an estimator across versions is unsupported and can change '
+            'what it predicts without failing. Re-run `meta_runner.py fit` to be '
+            'sure the gate behaves as it was measured.',
+            os.path.basename(path), trained_with, sklearn.__version__,
+        )
+
+    sidecar_features = sidecar.get('feature_names')
+    if sidecar_features is not None and list(sidecar_features) != list(model.feature_names):
+        raise ValueError(
+            f'{path} and its sidecar disagree about the feature set, so they are '
+            f'not the pair they were saved as -- one of the two has been replaced.\n'
+            f'  model:   {list(model.feature_names)}\n'
+            f'  sidecar: {list(sidecar_features)}'
+        )

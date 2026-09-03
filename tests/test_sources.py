@@ -152,7 +152,6 @@ def test_shfe_empty_prices_survive_as_nan(tmp_path):
 @pytest.mark.parametrize('symbol, expected', [
     ('C', ['C2601', 'C2603']),      # not cs2601, not the c2607-C-2040 option
     ('JM', ['JM2601']),             # not j2601
-    ('V', ['V2601']),
 ])
 def test_dce_contract_regex_is_anchored(tmp_path, symbol, expected):
     src = make_source(_DceSource, symbol, tmp_path)
@@ -193,10 +192,9 @@ def test_dce_trading_day_is_not_mistaken_for_a_holiday(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize('code, expiry', [
     ('RB1505', (2015, 5)),      # 4-digit YYMM in 2015, not 2005
-    ('BU2612', (2026, 12)),
+    ('RB2612', (2026, 12)),
     ('C2601', (2026, 1)),
     ('JM2605', (2026, 5)),
-    ('V2609', (2026, 9)),
 ])
 def test_codes_parse_into_the_roll_calendar(code, expiry):
     assert parse_contract_expiry(code, '2015-01-05') == expiry
@@ -510,8 +508,8 @@ def test_get_source_rejects_an_unknown_exchange(tmp_path):
 
 def test_shfe_and_dce_share_one_cache_dir_across_products(tmp_path):
     rb = make_source(_ShfeSource, 'RB', tmp_path)
-    hc = make_source(_ShfeSource, 'HC', tmp_path)
-    assert rb.cache_path(date(2026, 1, 5)) == hc.cache_path(date(2026, 1, 5))
+    ag = make_source(_ShfeSource, 'AG', tmp_path)
+    assert rb.cache_path(date(2026, 1, 5)) == ag.cache_path(date(2026, 1, 5))
 
     corn = make_source(_DceSource, 'C', tmp_path)
     coal = make_source(_DceSource, 'JM', tmp_path)
@@ -522,9 +520,9 @@ def test_shfe_and_dce_share_one_cache_dir_across_products(tmp_path):
 def test_every_exchange_caches_under_its_own_subfolder(tmp_path):
     """No venue writes into the top of ``cache/`` -- that holds only meta files."""
     soda = make_source(sources._CzceSource, 'SA', tmp_path)
-    glass = make_source(sources._CzceSource, 'FG', tmp_path)
+    cotton = make_source(sources._CzceSource, 'CF', tmp_path)
     assert soda.cache_path(2026) == str(tmp_path / 'CZCE' / 'SA2026.txt')
-    assert glass.cache_path(2026) == str(tmp_path / 'CZCE' / 'FG2026.txt')
+    assert cotton.cache_path(2026) == str(tmp_path / 'CZCE' / 'CF2026.txt')
 
     rb = make_source(_ShfeSource, 'RB', tmp_path)
     corn = make_source(_DceSource, 'C', tmp_path)

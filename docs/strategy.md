@@ -78,14 +78,55 @@ Handed to `on_bar`, after INTRABAR and before SETTLE:
 | `ctx.set_target(sym, lots)` | Target-position order; flips side in one order |
 | `ctx.buy/sell(sym, lots)` / `ctx.close(sym)` | Delta orders / flatten |
 | `ctx.set_stop(sym, price=…, distance=…)` / `ctx.cancel_stop(sym)` | Protective stop, armed at the next open |
+| `ctx.set_take_profit(sym, price=…, distance=…)` / `ctx.cancel_take_profit(sym)` | Target that closes the position when touched intrabar; OCO with the stop |
 | `ctx.size_for_risk(sym, stop_distance, risk_pct)` | Lots sized so a stop-out risks `risk_pct` of equity; `0` when the budget will not stretch to one lot (traced at DEBUG — run `--verbose` if a strategy trades less than expected) |
 
 Orders always fill against that day's calendar contract, so strategy code
 never names a physical contract or handles a roll itself.
 
+### The protective bracket
+
+`set_stop` and `set_take_profit` are the two legs of one OCO bracket. Both arm
+at the next OPEN against the fill that just happened, are then checked intrabar
+against the execution contract's high/low, and close the **whole** position when
+touched. Whichever fills first cancels the other. Each rule is sticky: it
+survives a dark session and re-arms after a close and reopen, so cancel it
+explicitly when a strategy exits for its own reasons.
+
+**The level follows the rule and the position, both.** A resting leg is
+re-resolved at the next OPEN whenever what it was resolved *from* moves —
+the position's average cost, its side, or the contract it sits on. So:
+
+- Calling `set_stop` again while one already rests **does** move it, at the
+  next OPEN. That is how a trailing stop is written; no `cancel_stop` first.
+- Adding to a position re-anchors a `distance` leg against the new average
+  cost, which is what "`distance` below its cost" means once there is more
+  than one fill in the position. Pass an explicit `price` to pin a level that
+  should not move.
+- Reversing re-arms on the correct side of the new position, and a roll moves
+  the level onto the new contract's price scale (see
+  [Backtesting](backtest.md)).
+- A dark session changes nothing. It cannot fill either leg, so it does not
+  touch them either.
+
+Pass a `distance`, not a `price`, whenever you can. Signals come off the
+OI-weighted continuous series but fills land on a real contract, and the two run
+a basis of a few percent — a level lifted from the weighted series lands in the
+wrong place, while a distance is anchored on the actual fill and the basis
+cancels.
+
+A take-profit is a *touch* fill, at the target (or at the open when the bar
+gapped past it). That is not the same rule as letting the bar close through the
+target and leaving at the next open, and the difference is not small.
+Which rule suits a strategy is an empirical question — check
+the `exit_reason` split in the run summary rather than assuming.
+
 ## Conventions
 
-- Guard every symbol with `can_trade(sym)` before trading it.
+- Guard every symbol with `can_trade(sym)` before trading it. An order for a
+  product whose own indicators are not valid yet is dropped, and the strategy
+  is never told; the run counts those and warns at the end (`warmup_skips`),
+  because from the outside they look exactly like a signal that never fired.
 - Prefer `set_target` over `buy`/`sell`: it is idempotent, so a repeated
   signal does not stack up a position.
 - Cross-sectional strategies read the whole `ctx.symbols` loop as one

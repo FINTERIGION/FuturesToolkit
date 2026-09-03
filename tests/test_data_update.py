@@ -74,9 +74,9 @@ def test_any_non_positive_price_disqualifies_the_row(bad_price):
 
 def test_the_weighted_bar_stays_internally_consistent():
     weighted = _build_weighted(_bars([
-        ('2026-01-05', 'V2601', 6000, 6100, 5900, 6050, 6040, 50_000, 20_000),
-        ('2026-01-05', 'V2603', 0, 0, 0, 6390, 6390, 2_000, 300),
-        ('2026-01-06', 'V2601', 6050, 6200, 6010, 6180, 6170, 51_000, 21_000),
+        ('2026-01-05', 'AG2602', 6000, 6100, 5900, 6050, 6040, 50_000, 20_000),
+        ('2026-01-05', 'AG2604', 0, 0, 0, 6390, 6390, 2_000, 300),
+        ('2026-01-06', 'AG2602', 6050, 6200, 6010, 6180, 6170, 51_000, 21_000),
     ]))
     assert len(weighted) == 2
     for _, row in weighted.iterrows():
@@ -238,7 +238,7 @@ def test_cli_separates_hard_failures_from_stale_ones(tmp_path, monkeypatch):
 
     monkeypatch.setattr(data_update, 'get_source', source_for)
     with pytest.raises(SystemExit) as excinfo:
-        data_update.main(['RB', 'HC'])
+        data_update.main(['RB', 'AG'])
     message = str(excinfo.value)
     assert 'failed for: RB' in message
-    assert 'incomplete' in message and 'HC' in message
+    assert 'incomplete' in message and 'AG' in message

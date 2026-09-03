@@ -19,6 +19,7 @@ from datafeed.products import (
     product_costs,
     require_products,
     roll_rule,
+    tick_size,
 )
 
 
@@ -33,6 +34,8 @@ def test_registry_entries_are_well_formed(code):
     assert 1990 < meta['start_year'] <= 2100
     assert meta['name'] and meta['name_zh']
     assert meta['multiplier'] > 0
+    assert 0 < meta['tick_size'] <= 100      # a band, not a spec: catches a decimal slip
+    assert tick_size(code) == float(meta['tick_size'])
     assert 0 < meta.get('margin_rate', 0.10) < 1
     has_rate = 'commission_rate' in meta
     has_per_lot = 'commission_per_lot' in meta
@@ -145,7 +148,7 @@ def test_roll_rule_falls_back_when_a_product_omits_the_keys():
 
 
 def test_roll_rule_honours_a_declared_override():
-    """A product off the default cycle -- SHFE rebar, bitumen -- is expressed
+    """A product off the default cycle -- SHFE rebar, silver -- is expressed
     by declaring the keys, so the override path is what matters, not which
     months any particular product happens to use today."""
     override = dict(PRODUCTS[list_products()[0]])
@@ -167,3 +170,27 @@ def test_roll_rule_rejects_an_out_of_range_month():
             roll_rule('ZZ_TEST')
     finally:
         del PRODUCTS['ZZ_TEST']
+
+
+def test_parse_product_rejects_a_contract_code_for_an_unregistered_product():
+    """A string shaped like a contract code is not a product unless the
+    registry carries it. Returning the letter run regardless produced a
+    plausible code that every costing and rolling helper then rejected, so the
+    failure surfaced as a KeyError deep inside `product_costs` rather than
+    where the unknown string came in."""
+    unregistered = 'ZZ'
+    assert unregistered not in PRODUCTS          # guard the premise
+    for raw in (unregistered, f'{unregistered}2601', f'{unregistered}601',
+                f'{unregistered}601_202601', f'{unregistered}_weighted'):
+        assert parse_product(raw) is None, raw
+
+
+def test_parse_product_result_is_always_costable():
+    """The contract `parse_product` now keeps: a non-None answer names a
+    product the rest of the registry can price and roll."""
+    for code in list(PRODUCTS):
+        for raw in (code, code.lower(), f'{code}_weighted', f'{code}2601', f'{code}601'):
+            parsed = parse_product(raw)
+            assert parsed is not None
+            product_costs(parsed)                # would raise KeyError if not registered
+            roll_rule(parsed)

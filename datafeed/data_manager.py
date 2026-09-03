@@ -48,7 +48,7 @@ class DataManager:
         Parameters
         ----------
         symbols : list[str], optional
-            Product codes to load, e.g. ``['SA', 'FG', 'RB', 'C']``.
+            Product codes to load, e.g. ``['SA', 'CF', 'RB', 'C']``.
         symbol : str, optional
             Single-product alias used when ``symbols`` is omitted.
         update : bool
