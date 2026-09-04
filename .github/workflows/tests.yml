@@ -21,7 +21,10 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        # The extras in pyproject.toml, not requirements.txt: the web panel's
+        # deps (fastapi, uvicorn, httpx) live only there, and tests/test_web_api.py
+        # fails at import without them.
+        run: pip install -e ".[test,web]"
 
       - name: Run tests
         run: pytest

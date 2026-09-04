@@ -37,10 +37,15 @@ A failed product is reported and skipped; the rest of the run continues.
 Both directories are gitignored. The weighted series is what strategies see;
 orders fill on the contract-level bars.
 
-## Product registry — `datafeed/products.py`
+## Product registry — `datafeed/products.json`
 
-One dict entry per product. Adding a product means adding a row here; nothing
-else in the codebase needs to know about it.
+One entry per product, git-tracked. Adding a product means adding an entry
+here — either by hand, or through the [web panel](web.md)'s Products page —
+and nothing else in the codebase needs to know about it.
+`datafeed/products.py` loads this file at import into the `PRODUCTS` dict and
+provides `validate_product`/`save_registry`/`reload_registry` for writers;
+every other helper (`product_costs`, `roll_rule`, `list_products`, ...) is
+unchanged from before the registry moved out of source code.
 
 | Key | Meaning |
 | --- | --- |

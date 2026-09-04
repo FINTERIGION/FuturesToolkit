@@ -28,14 +28,13 @@ import numpy as np
 import optuna
 from optuna.trial import TrialState
 
-from core.params import Categorical, Float, Int
 from strategies import load_strategy, name_for
 from research.objective import (
     DEFAULT_SPARSE_PENALTY, fold_objective, score, window_years,
 )
 from research.overfit import deflated_sharpe_ratio, is_oos_decay, pbo_cscv, plateau_check
 from research.runner_api import load_market, run_window
-from research.space import check_constraints, resolve_space, suggest
+from research.space import check_constraints, resolve_space, spec_to_json, suggest
 from research.splits import Window, anchored_walk_forward
 from research.warmup import probe_warmup
 
@@ -45,16 +44,6 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RESULTS_DIR = os.path.join(ROOT_DIR, 'results', 'optuna')
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
-
-
-def _spec_to_json(spec) -> dict:
-    if isinstance(spec, Int):
-        return {'kind': 'int', 'low': spec.low, 'high': spec.high, 'step': spec.step, 'log': spec.log}
-    if isinstance(spec, Float):
-        return {'kind': 'float', 'low': spec.low, 'high': spec.high, 'step': spec.step, 'log': spec.log}
-    if isinstance(spec, Categorical):
-        return {'kind': 'categorical', 'choices': list(spec.choices)}
-    raise TypeError(f'Unknown space spec: {spec!r}')
 
 
 def _probe_reserve_bars(market, strategy_cls, space, *, n_samples: int, margin: float, seed: int) -> int:
@@ -102,11 +91,18 @@ def run_study(
     results_dir: str = None,
     update_data: bool = False,
     market=None,
+    callbacks: list = None,
 ) -> dict:
     """``market``: pass a pre-built ``MarketData`` (e.g. in tests, with
     synthetic data) to skip loading from ``DataManager`` entirely; ``start``/
     ``end`` are then unused except as report metadata. Otherwise ``market``
     is loaded from ``symbols``/``start``/``end`` as usual.
+
+    ``callbacks``: forwarded verbatim to ``optuna.study.Study.optimize`` --
+    each is called as ``callback(study, trial)`` after every completed trial.
+    The web panel uses this to stream progress and to stop the study early
+    (``study.stop()``) on a user cancel; the CLI passes nothing, so a plain
+    ``run_study`` call behaves exactly as before.
     """
     if market is None:
         if start is None or end is None:
@@ -199,7 +195,7 @@ def run_study(
         study_name=name, storage=storage, load_if_exists=True,
         direction='maximize', sampler=optuna.samplers.TPESampler(seed=seed),
     )
-    study.optimize(objective, n_trials=n_trials)
+    study.optimize(objective, n_trials=n_trials, callbacks=callbacks)
 
     completed = [t for t in study.trials if t.state == TrialState.COMPLETE and t.number in trial_returns]
     if not completed:
@@ -297,7 +293,7 @@ def run_study(
         'reserve_bars': reserve_bars,
         'holdout_frac': holdout_frac,
         'holdout_window': {'start': holdout.start, 'end': holdout.end},
-        'space': {k: _spec_to_json(v) for k, v in space.items()},
+        'space': {k: spec_to_json(v) for k, v in space.items()},
         'fixed_defaults': {k: v for k, v in defaults.items() if k not in space},
         'best_trial_number': best_trial.number,
         'best_value': best_trial.value,

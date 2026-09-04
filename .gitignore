@@ -15,6 +15,11 @@ cache/
 results/
 models/
 
+# Web panel: frontend build tooling + its output (rebuilt via `npm run build`)
+webui/node_modules/
+webui/dist/
+web/static/
+
 # Private strategies: ignore custom modules; keep base + tracked examples
 strategies/*
 !strategies/__init__.py

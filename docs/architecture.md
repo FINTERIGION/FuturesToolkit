@@ -26,7 +26,7 @@ FuturesToolkit/
 │   ├── sources.py             #   per-exchange download & cache adapters (CZCE / SHFE / DCE)
 │   ├── data_update.py         #   OI-weighted aggregation & CSV output
 │   ├── data_manager.py        #   load / align / bundle data for the engine
-│   ├── products.py            #   product registry (multiplier, margin, commission, roll months)
+│   ├── products.py            #   registry loader/validator over products.json (multiplier, margin, commission, roll months)
 │   └── roll_calendar.py       #   date → main-month contract map (from products.py)
 ├── research/                  # Optuna parameter optimization (strategy-agnostic)
 │   ├── space.py               #   search-space resolution (declared / inferred / CLI override)
@@ -45,10 +45,20 @@ FuturesToolkit/
 ├── live/                      # Live signals (strategy- and model-agnostic)
 │   ├── signal.py              #   replay to the last bar, read the order never filled
 │   └── report.py              #   terminal table + results/live/*.json
+├── web/                       # Web panel backend (FastAPI) -- see docs/web.md
+│   ├── app.py                 #   app + SPA static mount + `python -m web.app`
+│   ├── jobs.py                #   background job manager (thread pool + SSE)
+│   ├── store.py                #   SQLite run-history index (results/webpanel.db)
+│   ├── serialize.py           #   JSON-safe conversion (inf/NaN/date/numpy)
+│   ├── marketcache.py         #   LRU over research.runner_api.load_market
+│   ├── static/                #   built frontend (gitignored; `npm run build` writes here)
+│   └── routers/                #   products, data, strategies, backtest, optimize, signals, runs, jobs
+├── webui/                     # Web panel frontend (Vite + React + TypeScript)
+│   └── src/                    #   api client, ECharts option builders, pages, i18n (en/zh)
 ├── tests/                     # pytest suite (synthetic MarketData fixtures)
 ├── data/                      # Generated CSVs (gitignored)
 ├── cache/                     # Raw exchange payloads per venue: cache/{CZCE,SHFE,DCE}/ (gitignored)
-└── results/                   # Backtest outputs (gitignored), incl. results/optuna, results/meta, results/live
+└── results/                   # Backtest outputs (gitignored), incl. results/optuna, results/meta, results/live, results/web
 ```
 
 ## Tests

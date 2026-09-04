@@ -18,6 +18,23 @@ from core.params import Categorical, Float, Int, Spec
 logger = logging.getLogger(__name__)
 
 
+def spec_to_json(spec: Spec) -> dict:
+    """Render one search-space spec as a JSON-safe dict.
+
+    Shared by the ``optimize`` report (``research.optimize.run_study``) and
+    the web panel's parameter editor, so both describe a strategy's tunable
+    surface identically -- one had this logic first and the other would
+    otherwise have to duplicate it.
+    """
+    if isinstance(spec, Int):
+        return {'kind': 'int', 'low': spec.low, 'high': spec.high, 'step': spec.step, 'log': spec.log}
+    if isinstance(spec, Float):
+        return {'kind': 'float', 'low': spec.low, 'high': spec.high, 'step': spec.step, 'log': spec.log}
+    if isinstance(spec, Categorical):
+        return {'kind': 'categorical', 'choices': list(spec.choices)}
+    raise TypeError(f'Unknown space spec: {spec!r}')
+
+
 def _infer_spec(value) -> Optional[Spec]:
     """Heuristic space for a param that declared no ``space`` entry.
 

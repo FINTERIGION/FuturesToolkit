@@ -1,0 +1,287 @@
+{
+  "SA": {
+    "exchange": "CZCE",
+    "name": "soda_ash",
+    "name_zh": "纯碱",
+    "start_year": 2019,
+    "multiplier": 20.0,
+    "tick_size": 1.0,
+    "margin_rate": 0.11,
+    "commission_rate": 0.0001,
+    "main_months": [
+      1,
+      5,
+      9
+    ]
+  },
+  "CF": {
+    "exchange": "CZCE",
+    "name": "cotton",
+    "name_zh": "棉花",
+    "start_year": 2015,
+    "main_months": [
+      1,
+      5,
+      9
+    ],
+    "multiplier": 5,
+    "tick_size": 5.0,
+    "margin_rate": 0.1,
+    "commission_per_lot": 4.3
+  },
+  "FG": {
+    "exchange": "CZCE",
+    "name": "glass",
+    "name_zh": "玻璃",
+    "start_year": 2015,
+    "main_months": [
+      1,
+      5,
+      9
+    ],
+    "multiplier": 20,
+    "tick_size": 1.0,
+    "margin_rate": 0.12,
+    "commission_per_lot": 2.0
+  },
+  "SR": {
+    "exchange": "CZCE",
+    "name": "white_sugar",
+    "name_zh": "白糖",
+    "start_year": 2015,
+    "main_months": [
+      1,
+      5,
+      9
+    ],
+    "multiplier": 10,
+    "tick_size": 1.0,
+    "margin_rate": 0.09,
+    "commission_per_lot": 2.0
+  },
+  "AG": {
+    "exchange": "SHFE",
+    "name": "silver",
+    "name_zh": "沪银",
+    "start_year": 2015,
+    "main_months": [
+      2,
+      4,
+      6,
+      8,
+      10,
+      12
+    ],
+    "multiplier": 15,
+    "tick_size": 1.0,
+    "margin_rate": 0.25,
+    "commission_rate": 1e-05
+  },
+  "AU": {
+    "exchange": "SHFE",
+    "name": "gold",
+    "name_zh": "沪金",
+    "start_year": 2015,
+    "main_months": [
+      2,
+      4,
+      6,
+      8,
+      10,
+      12
+    ],
+    "multiplier": 1000,
+    "tick_size": 0.02,
+    "margin_rate": 0.19,
+    "commission_per_lot": 10.0
+  },
+  "CU": {
+    "exchange": "SHFE",
+    "name": "copper",
+    "name_zh": "沪铜",
+    "start_year": 2015,
+    "main_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "multiplier": 5,
+    "tick_size": 10.0,
+    "margin_rate": 0.14,
+    "commission_rate": 5e-05
+  },
+  "AL": {
+    "exchange": "SHFE",
+    "name": "aluminium",
+    "name_zh": "沪铝",
+    "start_year": 2015,
+    "main_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "multiplier": 5,
+    "tick_size": 5.0,
+    "margin_rate": 0.14,
+    "commission_per_lot": 3.0
+  },
+  "ZN": {
+    "exchange": "SHFE",
+    "name": "zinc",
+    "name_zh": "沪锌",
+    "start_year": 2015,
+    "main_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "multiplier": 5,
+    "tick_size": 5.0,
+    "margin_rate": 0.15,
+    "commission_per_lot": 3.0
+  },
+  "SN": {
+    "exchange": "SHFE",
+    "name": "tin",
+    "name_zh": "沪锡",
+    "start_year": 2021,
+    "main_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "multiplier": 1,
+    "tick_size": 10.0,
+    "margin_rate": 0.18,
+    "commission_per_lot": 3.0
+  },
+  "RB": {
+    "exchange": "SHFE",
+    "name": "rebar",
+    "name_zh": "螺纹钢",
+    "start_year": 2015,
+    "main_months": [
+      1,
+      5,
+      10
+    ],
+    "multiplier": 10,
+    "tick_size": 1.0,
+    "margin_rate": 0.1,
+    "commission_rate": 0.0001
+  },
+  "HC": {
+    "exchange": "SHFE",
+    "name": "hot_rolled_coil",
+    "name_zh": "热卷",
+    "start_year": 2015,
+    "main_months": [
+      1,
+      5,
+      10
+    ],
+    "multiplier": 10,
+    "tick_size": 1.0,
+    "margin_rate": 0.1,
+    "commission_rate": 0.0001
+  },
+  "RU": {
+    "exchange": "SHFE",
+    "name": "rubber",
+    "name_zh": "橡胶",
+    "start_year": 2015,
+    "main_months": [
+      1,
+      5,
+      9
+    ],
+    "multiplier": 10,
+    "tick_size": 5.0,
+    "margin_rate": 0.12,
+    "commission_per_lot": 3.0
+  },
+  "C": {
+    "exchange": "DCE",
+    "name": "corn",
+    "name_zh": "玉米",
+    "start_year": 2015,
+    "main_months": [
+      1,
+      5,
+      9
+    ],
+    "multiplier": 10,
+    "tick_size": 1.0,
+    "margin_rate": 0.11,
+    "commission_per_lot": 1.2
+  },
+  "JM": {
+    "exchange": "DCE",
+    "name": "coking_coal",
+    "name_zh": "焦煤",
+    "start_year": 2015,
+    "main_months": [
+      1,
+      5,
+      9
+    ],
+    "multiplier": 60,
+    "tick_size": 0.5,
+    "margin_rate": 0.17,
+    "commission_rate": 0.0001
+  },
+  "LH": {
+    "exchange": "DCE",
+    "name": "live_hog",
+    "name_zh": "生猪",
+    "start_year": 2021,
+    "main_months": [
+      1,
+      3,
+      5,
+      7,
+      9,
+      11
+    ],
+    "multiplier": 16,
+    "tick_size": 5.0,
+    "margin_rate": 0.11,
+    "commission_rate": 0.0002
+  }
+}

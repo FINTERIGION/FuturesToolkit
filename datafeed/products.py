@@ -1,5 +1,9 @@
 """Registered products (CZCE, SHFE, DCE) and symbol helpers.
 
+The registry itself lives in ``datafeed/products.json`` (git-tracked; edited
+either by hand or through the web panel's Products page) -- this module is
+the loader plus the field documentation and every helper that reads it.
+
 ``exchange`` selects the download adapter in ``datafeed.sources``; every other
 key here is venue-agnostic.
 
@@ -12,7 +16,7 @@ on gold (0.02) and a 10-point gap on copper.
 Commission is per product, one of:
   commission_rate      fraction of notional (price × lots × multiplier)
   commission_per_lot   fixed CNY per lot
-If both are set, ``commission_per_lot`` wins.
+Exactly one must be set; ``validate_product`` enforces this on every write.
 
 Rolling is per product too:
   main_months          delivery months that carry the liquidity, e.g. (1, 5, 9)
@@ -38,203 +42,156 @@ into the traded set a one-word change.
 The numbers below are a starting point, not a live feed: exchanges revise
 multipliers, margin floors, and fee schedules by notice, and a broker's margin
 sits above the exchange floor by an amount only your own account statement
-knows. Calibrate them yourself before trusting a backtest's cost model -- the
-tests here check only that each entry is well formed, never what it says.
+knows. Calibrate them yourself before trusting a backtest's cost model --
+``validate_product`` checks only that each entry is well formed, never what
+it says.
 """
 
 from __future__ import annotations
 
+import json
+import os
 import re
+import tempfile
 from typing import Dict, Iterable, List, Optional, Tuple
 
 _CONTRACT_RE = re.compile(r'^([A-Za-z]+)(\d+)$')
 _CONTRACT_DECADE_RE = re.compile(r'^([A-Za-z]+)(\d+)_(\d{6})$')
 _WEIGHTED_SUFFIX = '_weighted'
+_CODE_RE = re.compile(r'^[A-Z0-9]+$')
 
 DEFAULT_MAIN_MONTHS = (1, 5, 9)
 DEFAULT_ROLL_LEAD_MONTHS = 1
+SUPPORTED_EXCHANGES = ('CZCE', 'SHFE', 'DCE')
 
-PRODUCTS: Dict[str, dict] = {
-    # -- CZCE ---------------------------------------------------------------
-    'SA': {
-        'exchange': 'CZCE',
-        'name': 'soda_ash',
-        'name_zh': '纯碱',
-        'start_year': 2019,
-        'main_months': (1, 5, 9),
-        'multiplier': 20,
-        'tick_size': 1.0,
-        'margin_rate': 0.11,
-        'commission_rate': 0.0001,
-    },
-    'CF': {
-        'exchange': 'CZCE',
-        'name': 'cotton',
-        'name_zh': '棉花',
-        'start_year': 2015,
-        'main_months': (1, 5, 9),
-        'multiplier': 5,
-        'tick_size': 5.0,
-        'margin_rate': 0.10,
-        'commission_per_lot': 4.3,
-    },
-    'FG': {
-        'exchange': 'CZCE',
-        'name': 'glass',
-        'name_zh': '玻璃',
-        'start_year': 2015,
-        'main_months': (1, 5, 9),
-        'multiplier': 20,
-        'tick_size': 1.0,
-        'margin_rate': 0.12,
-        'commission_per_lot': 2.0,
-    },
-    'SR': {
-        'exchange': 'CZCE',
-        'name': 'white_sugar',
-        'name_zh': '白糖',
-        'start_year': 2015,
-        'main_months': (1, 5, 9),
-        'multiplier': 10,
-        'tick_size': 1.0,
-        'margin_rate': 0.09,
-        'commission_per_lot': 2.0,
-    },
-    # -- SHFE ---------------------------------------------------------------
-    'AG': {
-        'exchange': 'SHFE',
-        'name': 'silver',
-        'name_zh': '沪银',
-        'start_year': 2015,
-        'main_months': (2, 4, 6, 8, 10, 12),
-        'multiplier': 15,
-        'tick_size': 1.0,
-        'margin_rate': 0.25,
-        'commission_rate': 0.00001,
-    },
-    'AU': {
-        'exchange': 'SHFE',
-        'name': 'gold',
-        'name_zh': '沪金',
-        'start_year': 2015,
-        'main_months': (2, 4, 6, 8, 10, 12),
-        'multiplier': 1000,
-        'tick_size': 0.02,
-        'margin_rate': 0.19,
-        'commission_per_lot': 10.0,
-    },
-    'CU': {
-        'exchange': 'SHFE',
-        'name': 'copper',
-        'name_zh': '沪铜',
-        'start_year': 2015,
-        'main_months': (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12),
-        'multiplier': 5,
-        'tick_size': 10.0,
-        'margin_rate': 0.14,
-        'commission_rate': 0.00005,
-    },
-    'AL': {
-        'exchange': 'SHFE',
-        'name': 'aluminium',
-        'name_zh': '沪铝',
-        'start_year': 2015,
-        'main_months': (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12),
-        'multiplier': 5,
-        'tick_size': 5.0,
-        'margin_rate': 0.14,
-        'commission_per_lot': 3.0,
-    },
-    'ZN': {
-        'exchange': 'SHFE',
-        'name': 'zinc',
-        'name_zh': '沪锌',
-        'start_year': 2015,
-        'main_months': (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12),
-        'multiplier': 5,
-        'tick_size': 5.0,
-        'margin_rate': 0.15,
-        'commission_per_lot': 3.0,
-    },
-    'SN': {
-        'exchange': 'SHFE',
-        'name': 'tin',
-        'name_zh': '沪锡',
-        'start_year': 2021,
-        'main_months': (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12),
-        'multiplier': 1,
-        'tick_size': 10.0,
-        'margin_rate': 0.18,
-        'commission_per_lot': 3.0,
-    },
-    'RB': {
-        'exchange': 'SHFE',
-        'name': 'rebar',
-        'name_zh': '螺纹钢',
-        'start_year': 2015,
-        'main_months': (1, 5, 10),
-        'multiplier': 10,
-        'tick_size': 1.0,
-        'margin_rate': 0.10,
-        'commission_rate': 0.0001,
-    },
-    'HC': {
-        'exchange': 'SHFE',
-        'name': 'hot_rolled_coil',
-        'name_zh': '热卷',
-        'start_year': 2015,
-        'main_months': (1, 5, 10),
-        'multiplier': 10,
-        'tick_size': 1.0,
-        'margin_rate': 0.10,
-        'commission_rate': 0.0001,
-    },
-    'RU': {
-        'exchange': 'SHFE',
-        'name': 'rubber',
-        'name_zh': '橡胶',
-        'start_year': 2015,
-        'main_months': (1, 5, 9),
-        'multiplier': 10,
-        'tick_size': 5.0,
-        'margin_rate': 0.12,
-        'commission_per_lot': 3.0,
-    },
-    # -- DCE ----------------------------------------------------------------
-    'C': {
-        'exchange': 'DCE',
-        'name': 'corn',
-        'name_zh': '玉米',
-        'start_year': 2015,
-        'main_months': (1, 5, 9),
-        'multiplier': 10,
-        'tick_size': 1.0,
-        'margin_rate': 0.11,
-        'commission_per_lot': 1.2,
-    },
-    'JM': {
-        'exchange': 'DCE',
-        'name': 'coking_coal',
-        'name_zh': '焦煤',
-        'start_year': 2015,
-        'main_months': (1, 5, 9),
-        'multiplier': 60,
-        'tick_size': 0.5,
-        'margin_rate': 0.17,
-        'commission_rate': 0.0001,
-    },
-    'LH': {
-        'exchange': 'DCE',
-        'name': 'live_hog',
-        'name_zh': '生猪',
-        'start_year': 2021,
-        'main_months': (1, 3, 5, 7, 9, 11),
-        'multiplier': 16,
-        'tick_size': 5.0,
-        'margin_rate': 0.11,
-        'commission_rate': 0.0002,
-    },
-}
+REGISTRY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'products.json')
+
+
+def _load_registry(path: str = None) -> Dict[str, dict]:
+    """Read the registry file, coercing JSON arrays back to the tuples this
+    module's helpers expect (``main_months``). Key order is preserved --
+    ``json.load`` keeps the file's order, and ``list_products`` depends on it.
+    """
+    with open(path or REGISTRY_PATH, encoding='utf-8') as f:
+        raw = json.load(f)
+    out: Dict[str, dict] = {}
+    for code, meta in raw.items():
+        entry = dict(meta)
+        if 'main_months' in entry:
+            entry['main_months'] = tuple(entry['main_months'])
+        out[code] = entry
+    return out
+
+
+PRODUCTS: Dict[str, dict] = _load_registry()
+
+
+def validate_product(code: str, meta: dict) -> dict:
+    """Validate one registry entry's shape and return it normalized.
+
+    Codifies the invariants this repo's own test suite checks against every
+    entry (``tests/test_products.py``), so a product added or edited through
+    the web panel is held to the same bar as one hand-written here. Raises
+    ``ValueError`` naming the first offending field -- callers (the web API)
+    turn that into a field-level 422.
+    """
+    norm_code = normalize_symbol(code)
+    if not norm_code or not _CODE_RE.match(norm_code):
+        raise ValueError(f'Invalid product code {code!r}: use letters/digits only')
+
+    out = dict(meta)
+
+    exchange = out.get('exchange')
+    if exchange not in SUPPORTED_EXCHANGES:
+        raise ValueError(f'exchange must be one of {SUPPORTED_EXCHANGES}, got {exchange!r}')
+
+    start_year = out.get('start_year')
+    if not isinstance(start_year, int) or isinstance(start_year, bool) or not (1990 < start_year <= 2100):
+        raise ValueError(f'start_year must be an int in (1990, 2100], got {start_year!r}')
+
+    name = out.get('name')
+    if not name or not isinstance(name, str):
+        raise ValueError('name must be a non-empty string')
+    name_zh = out.get('name_zh')
+    if not name_zh or not isinstance(name_zh, str):
+        raise ValueError('name_zh must be a non-empty string')
+
+    multiplier = out.get('multiplier')
+    if not isinstance(multiplier, (int, float)) or isinstance(multiplier, bool) or multiplier <= 0:
+        raise ValueError(f'multiplier must be > 0, got {multiplier!r}')
+
+    tick = out.get('tick_size')
+    if not isinstance(tick, (int, float)) or isinstance(tick, bool) or not (0 < tick <= 100):
+        raise ValueError(f'tick_size must be in (0, 100], got {tick!r}')
+
+    margin_rate = out.get('margin_rate', 0.10)
+    if not isinstance(margin_rate, (int, float)) or isinstance(margin_rate, bool) or not (0 < margin_rate < 1):
+        raise ValueError(f'margin_rate must be in (0, 1), got {margin_rate!r}')
+    out['margin_rate'] = float(margin_rate)
+
+    has_rate = out.get('commission_rate') is not None
+    has_per_lot = out.get('commission_per_lot') is not None
+    if has_rate == has_per_lot:
+        raise ValueError(
+            'exactly one of commission_rate or commission_per_lot must be set '
+            f'(got commission_rate={out.get("commission_rate")!r}, '
+            f'commission_per_lot={out.get("commission_per_lot")!r})'
+        )
+    if has_rate:
+        out['commission_rate'] = float(out['commission_rate'])
+        out.pop('commission_per_lot', None)
+    else:
+        out['commission_per_lot'] = float(out['commission_per_lot'])
+        out.pop('commission_rate', None)
+
+    if 'main_months' in out:
+        out['main_months'] = normalize_main_months(out['main_months'])
+    if 'roll_lead_months' in out:
+        lead = out['roll_lead_months']
+        if not isinstance(lead, int) or isinstance(lead, bool) or lead < 1:
+            raise ValueError(f'roll_lead_months must be an int >= 1, got {lead!r}')
+
+    out['multiplier'] = float(multiplier)
+    out['tick_size'] = float(tick)
+    return out
+
+
+def save_registry(registry: Dict[str, dict], path: str = None) -> None:
+    """Validate every entry, then persist atomically and reload in place.
+
+    Atomic (tmp file + ``os.replace``) so a validation failure or a crash
+    mid-write never corrupts the file on disk -- either every entry passes
+    and the whole file is replaced in one step, or nothing is written.
+    ``PRODUCTS`` is updated in place afterwards, so every module that already
+    holds ``from datafeed.products import PRODUCTS`` sees the change without
+    re-importing.
+    """
+    target = path or REGISTRY_PATH
+    normalized = {
+        normalize_symbol(code): validate_product(code, meta)
+        for code, meta in registry.items()
+    }
+
+    directory = os.path.dirname(target) or '.'
+    fd, tmp_path = tempfile.mkstemp(dir=directory, prefix='.products.', suffix='.json.tmp')
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump(normalized, f, indent=2, ensure_ascii=False)
+            f.write('\n')
+        os.replace(tmp_path, target)
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
+
+    reload_registry(target)
+
+
+def reload_registry(path: str = None) -> None:
+    """Re-read the registry file and update ``PRODUCTS`` in place."""
+    fresh = _load_registry(path or REGISTRY_PATH)
+    PRODUCTS.clear()
+    PRODUCTS.update(fresh)
 
 
 def list_products() -> List[str]:

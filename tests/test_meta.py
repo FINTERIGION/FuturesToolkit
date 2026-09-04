@@ -33,7 +33,7 @@ from research.warmup import probe_warmup
 from runner import run_single_backtest
 from strategies.base import SetupContext, Strategy
 from strategies.double_ma import DoubleMaStrategy
-from tests.conftest import build_market, build_panel
+from tests.conftest import build_market, build_oscillating_market, build_panel
 
 N_BARS = 400
 
@@ -57,28 +57,9 @@ class _AlwaysAllow:
 
 
 def _trending_market(n_bars=N_BARS, symbols=('SA', 'CF')):
-    """Two products on a sine-plus-drift path, so DoubleMa actually trades."""
-    rng = np.random.default_rng(7)
-    products = {}
-    for k, sym in enumerate(symbols):
-        t = np.arange(n_bars, dtype='float64')
-        close = 100.0 + 20.0 * np.sin(t / (18.0 + 5 * k)) + 0.02 * t + rng.normal(0, 0.6, n_bars)
-        close = np.maximum(close, 5.0)
-        code = f'{sym}509'
-        contracts = {code: {i: (close[i], close[i] + 1, close[i] - 1, close[i], close[i],
-                                1000.0 + i, 500.0 + i) for i in range(n_bars)}}
-        products[sym] = build_panel(
-            sym, n_bars,
-            weighted={
-                'open': close, 'high': close + 1.0, 'low': close - 1.0,
-                'close': close, 'settle': close,
-                'oi': 1000.0 + np.arange(n_bars), 'volume': 500.0 + np.arange(n_bars),
-                'session': np.ones(n_bars),
-            },
-            contracts=contracts,
-            contract_by_bar=[code] * n_bars,
-        )
-    return build_market(products, n_bars)
+    """Two products on a sine-plus-drift path, so DoubleMa actually trades --
+    this module's default bar count over the shared builder (tests/conftest.py)."""
+    return build_oscillating_market(symbols=symbols, n_bars=n_bars)
 
 
 def _run(market, cls, params=None, cash=200_000.0):

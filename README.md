@@ -16,6 +16,7 @@ It downloads historical data straight from each exchange, builds open-interest�
 - **Research tools** — Optuna parameter optimization with anchored walk-forward validation, a locked holdout window, and overfitting diagnostics
 - **Meta-labeling** — a second-stage classifier that vetoes a strategy's weakest entries, validated by purged walk-forward with a shuffled-label control
 - **Live signals** — the next session's target positions for any strategy, gated by a meta-model or not
+- **Web panel** — a local browser UI for managing products, downloading data, running backtests and Optuna tuning with live progress, reading signals, and comparing run history
 
 ## Quick Start
 
@@ -56,4 +57,5 @@ python runner.py --symbols SA CF RB --start 2020-01-01 --end 2026-12-31 \
 | [Parameter Optimization](docs/research.md) | `research_runner.py` subcommands, walk-forward splits, objective, overfitting diagnostics |
 | [Meta-Labeling](docs/meta-labeling.md) | `meta_runner.py` workflow, leak controls, how to read the result |
 | [Live Signals](docs/live.md) | `live_runner.py` flags, output columns, caveats |
+| [Web Panel](docs/web.md) | Browser UI for products, data, backtest, optimize, signals, run history |
 | [Project Layout](docs/architecture.md) | Directory map, tests |

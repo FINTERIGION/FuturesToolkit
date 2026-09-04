@@ -14,6 +14,7 @@ from datafeed.products import (
     DEFAULT_MAIN_MONTHS,
     DEFAULT_ROLL_LEAD_MONTHS,
     PRODUCTS,
+    SUPPORTED_EXCHANGES,
     list_products,
     parse_product,
     product_costs,
@@ -21,9 +22,6 @@ from datafeed.products import (
     roll_rule,
     tick_size,
 )
-
-
-SUPPORTED_EXCHANGES = {'CZCE', 'SHFE', 'DCE'}
 
 
 @pytest.mark.parametrize('code', list(PRODUCTS))
@@ -78,9 +76,15 @@ def test_product_costs_mirrors_the_registry(code):
         assert costs['commission_rate'] == pytest.approx(meta['commission_rate'])
 
 
-def test_every_supported_exchange_is_represented():
+def test_every_registered_exchange_is_supported():
+    """Every declared exchange is one this toolkit can download from.
+
+    Not the reverse: the registry is now user-editable data (products.json),
+    so a supported exchange with nothing currently registered on it -- e.g.
+    the last DCE product deleted through the web panel -- is not a bug.
+    """
     exchanges = {PRODUCTS[c]['exchange'] for c in list_products()}
-    assert exchanges == SUPPORTED_EXCHANGES
+    assert exchanges <= set(SUPPORTED_EXCHANGES)
 
 
 def test_list_products_preserves_definition_order():

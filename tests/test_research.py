@@ -27,7 +27,7 @@ from research.space import resolve_space
 from research.splits import Window, anchored_walk_forward
 from research.warmup import probe_warmup
 
-from tests.conftest import build_market, build_panel
+from tests.conftest import build_market, build_panel, build_trending_market
 
 ALL_STRATEGIES = discover_strategies()
 TUNABLE_STRATEGIES = {
@@ -37,29 +37,10 @@ TUNABLE_STRATEGIES = {
 
 
 def _trending_market(n_bars: int = 900, seed: int = 0):
-    """A single-product synthetic market with a trend + a ~15-bar cycle, so
-    both a crossover and a mean-reversion strategy generate real trades."""
-    rng = np.random.default_rng(seed)
-    t = np.arange(n_bars, dtype='float64')
-    close = 100.0 + 0.03 * t + 4.0 * np.sin(t / 15.0) + rng.normal(0, 0.3, n_bars)
-    open_ = np.empty(n_bars)
-    open_[0] = close[0]
-    open_[1:] = close[:-1]
-    high = np.maximum(open_, close) + rng.uniform(0.1, 0.5, n_bars)
-    low = np.minimum(open_, close) - rng.uniform(0.1, 0.5, n_bars)
-    volume = rng.uniform(1000, 2000, n_bars)
-    oi = rng.uniform(5000, 6000, n_bars)
-
-    weighted = {
-        'open': open_, 'high': high, 'low': low, 'close': close, 'settle': close.copy(),
-        'oi': oi, 'volume': volume, 'session': np.ones(n_bars),
-    }
-    contracts = {
-        'C1': {i: (open_[i], high[i], low[i], close[i], close[i], oi[i], volume[i]) for i in range(n_bars)},
-    }
-    panel = build_panel('SA', n_bars, weighted=weighted, contracts=contracts,
-                         contract_by_bar=['C1'] * n_bars, first_bar=0)
-    return build_market({'SA': panel}, n_bars)
+    """This module's single-product universe over the shared trending builder
+    (tests/conftest.py): a trend plus a ~15-bar cycle, so both a crossover and
+    a mean-reversion strategy generate real trades."""
+    return build_trending_market(('SA',), n_bars=n_bars, seed=seed)
 
 
 def _crashing_market(sym: str = 'AU', n_bars: int = 600, crash_bar: int = 400):
@@ -106,7 +87,8 @@ def test_slice_market_rebases_bar_indices(market):
     sliced_panel = sliced.products['SA']
     assert np.array_equal(sliced_panel.weighted['close'], panel.weighted['close'][100:300])
     # A contract row at absolute bar 150 should show up at local bar 50.
-    assert np.array_equal(sliced_panel.contracts['C1'].row_at(50), panel.contracts['C1'].row_at(150))
+    code = next(iter(panel.contracts))
+    assert np.array_equal(sliced_panel.contracts[code].row_at(50), panel.contracts[code].row_at(150))
     assert sliced_panel.first_bar == 0
 
 

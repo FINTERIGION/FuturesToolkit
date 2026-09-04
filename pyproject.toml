@@ -22,9 +22,14 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest==9.1.1"]
+web = [
+    "fastapi==0.121.3",
+    "uvicorn[standard]==0.41.0",
+    "httpx==0.28.1",
+]
 
 [tool.setuptools]
-packages = ["core", "datafeed", "strategies", "research", "meta", "live"]
+packages = ["core", "datafeed", "strategies", "research", "meta", "live", "web"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

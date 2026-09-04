@@ -1,3 +1,9 @@
+# Runtime deps for the CLI runners, pinned to match pyproject.toml.
+#
+# Not the full test environment: the web panel (fastapi, uvicorn, httpx) and
+# pytest are extras in pyproject.toml, and CI installs `.[test,web]` rather
+# than this file. Add web deps there, not here, or there will be two pin sets
+# to keep in step.
 pandas==3.0.1
 numpy==2.4.2
 matplotlib==3.10.8
