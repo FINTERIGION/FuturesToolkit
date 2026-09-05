@@ -263,3 +263,104 @@ export interface SignalReport {
   deferred: Record<string, number>
   model?: { path: string; keep_rate: number; threshold: number; trained_through: string }
 }
+
+// -------------------------------------------------------------------------
+
+export interface FactorInfo {
+  key: string
+  class_name: string
+  module: string
+  docstring: string
+  direction: number
+  params: Record<string, unknown>
+  fixed_params: string[]
+  space: Record<string, SpaceSpec>
+  space_error: string | null
+}
+
+export interface FactorICStat {
+  n_obs: number
+  mean: number
+  std: number
+  ir: number
+  t_stat: number
+  p_value: number
+  positive_rate: number
+}
+
+export interface FactorReturnStat {
+  n_obs: number
+  mean: number
+  std: number
+  t_stat: number
+  sharpe: number
+}
+
+export interface FactorAnnualSlice {
+  n_bars: number
+  ic_mean: number
+  ic_ir: number
+  ic_t_stat: number
+  long_short_mean: number
+  long_short_sharpe: number
+}
+
+export interface FactorCoverage {
+  n_symbols: number
+  n_bars: number
+  mean: number
+  min: number
+  max: number
+  first_scored_bar: number
+  bars_with_full_coverage: number
+}
+
+export interface FactorQuantiles {
+  horizon: number
+  groups: Record<string, FactorReturnStat>
+  spread: FactorReturnStat
+  monotonicity: number
+}
+
+export interface FactorReport {
+  factor: string
+  params: Record<string, unknown>
+  symbols: string[]
+  return_source: string
+  n_groups: number
+  horizons: number[]
+  start?: string
+  end?: string
+  coverage: FactorCoverage
+  ic_decay: Record<string, FactorICStat>
+  annual_slices: Record<string, FactorAnnualSlice>
+  quantiles: FactorQuantiles
+  turnover: { top: number; bottom: number }
+  autocorr: Record<string, number>
+  ic_curve: { dates: string[]; cumulative_ic: number[] }
+  quantile_curve: { dates: string[]; curves: number[][] }
+}
+
+export interface FactorReportSummary {
+  name: string
+  factor: string | null
+  symbols: string[] | null
+  start: string | null
+  end: string | null
+  n_groups: number | null
+  return_source: string | null
+}
+
+export interface FactorCorrRow {
+  factor: string
+  [name: string]: number | string | null
+}
+
+export interface FactorCorrResult {
+  symbols: string[]
+  horizon: number
+  start?: string
+  end?: string
+  correlation_matrix: FactorCorrRow[]
+  ic_correlation: FactorCorrRow[]
+}

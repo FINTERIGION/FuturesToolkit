@@ -75,6 +75,15 @@ class SetupContext:
         self.symbols = list(engine.symbols)
         self.dates = engine.market.dates
 
+    @property
+    def market(self):
+        """The full ``MarketData`` this run is trading -- the whole panel,
+        not a per-symbol slice. Needed to build a
+        ``factors.base.FactorContext`` over the same universe (see
+        ``strategies.factor_bridge``); most strategies want the per-symbol
+        accessors below instead."""
+        return self._engine.market
+
     def _weighted(self, sym: str, field: str) -> np.ndarray:
         return self._engine.market.products[sym].weighted[field]
 

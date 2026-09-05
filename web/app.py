@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from web.config import DEFAULT_HOST, DEFAULT_PORT, STATIC_DIR, is_within
-from web.routers import backtest, data, jobs, optimize, products, runs, signals, strategies
+from web.routers import backtest, data, factors, jobs, optimize, products, runs, signals, strategies
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(name)s %(message)s')
 
@@ -33,7 +33,7 @@ app.add_middleware(
     allow_headers=['*'],
 )
 
-for router in (products, data, strategies, backtest, optimize, signals, runs, jobs):
+for router in (products, data, strategies, backtest, optimize, factors, signals, runs, jobs):
     app.include_router(router.router)
 
 

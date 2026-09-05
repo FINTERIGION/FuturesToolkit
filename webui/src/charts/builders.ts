@@ -1,6 +1,6 @@
 import type { EChartsOption } from 'echarts'
 import type { Bar, RollPoint } from '../api/types'
-import { CANDLE } from '../theme/palette'
+import { CANDLE, DIVERGING } from '../theme/palette'
 import { baseOption, categoryAxis, chartTokens, valueAxis } from './theme'
 
 /** One or more named series against a shared date axis -- an equity curve,
@@ -231,6 +231,90 @@ export function optimizeProgressOption(dark: boolean, trialNumbers: number[], va
         showSymbol: false,
         lineStyle: { width: 2, color: categorical[1] },
         itemStyle: { color: categorical[1] },
+      },
+    ],
+  }
+}
+
+/** One bar per calendar year (a factor's annual IC, or annual long/short
+ * Sharpe) -- the check "never trust the aggregate without this" exists for.
+ * Single series: sign carries the meaning, not a legend, so each bar is
+ * colored by its own sign off the diverging pair's two poles. */
+export function annualBarOption(dark: boolean, years: string[], values: number[]): EChartsOption {
+  const diverging = dark ? DIVERGING.dark : DIVERGING.light
+  return {
+    ...baseOption(dark),
+    legend: { show: false },
+    tooltip: { ...baseOption(dark).tooltip, trigger: 'axis', axisPointer: { type: 'shadow' } },
+    xAxis: categoryAxis(dark, years, { boundaryGap: true }),
+    yAxis: valueAxis(dark),
+    series: [
+      {
+        type: 'bar',
+        data: values,
+        barMaxWidth: 32,
+        itemStyle: {
+          borderRadius: [4, 4, 0, 0],
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          color: (params: any) => (Number(params.value) >= 0 ? diverging[0] : diverging[2]),
+        },
+      },
+    ],
+  }
+}
+
+/** Symmetric correlation matrix as a heatmap: cell color on the diverging
+ * (blue<->red) scale, cell text the value itself so the exact number never
+ * depends on hover. ``matrix[i][j]`` is ``null`` where fewer than
+ * ``min_names`` products/bars overlapped -- rendered as an empty cell. */
+export function correlationHeatmapOption(dark: boolean, names: string[], matrix: (number | null)[][]): EChartsOption {
+  const { ink } = chartTokens(dark)
+  const diverging = dark ? DIVERGING.dark : DIVERGING.light
+  const cells: [number, number, number | string][] = []
+  for (let i = 0; i < names.length; i++) {
+    for (let j = 0; j < names.length; j++) {
+      const v = matrix[i]?.[j] ?? null
+      cells.push([j, i, v === null ? '' : Math.round(v * 1000) / 1000])
+    }
+  }
+  const axisLabel = { color: ink.muted, fontSize: 11 }
+  return {
+    backgroundColor: 'transparent',
+    textStyle: { color: ink.secondary, fontFamily: 'inherit' },
+    grid: { left: 100, right: 20, top: 10, bottom: 70, containLabel: true },
+    xAxis: { type: 'category', data: names, splitArea: { show: true }, axisLabel: { ...axisLabel, rotate: 30 } },
+    yAxis: { type: 'category', data: names, splitArea: { show: true }, axisLabel },
+    visualMap: {
+      min: -1,
+      max: 1,
+      calculable: true,
+      orient: 'horizontal',
+      left: 'center',
+      bottom: 0,
+      inRange: { color: diverging },
+      textStyle: { color: ink.secondary },
+    },
+    tooltip: {
+      backgroundColor: dark ? '#242530' : '#ffffff',
+      borderColor: ink.grid,
+      borderWidth: 1,
+      textStyle: { color: ink.primary, fontSize: 12 },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      formatter: (p: any) => `${names[p.data[1]]} × ${names[p.data[0]]}: ${p.data[2] === '' ? 'n/a' : p.data[2]}`,
+    },
+    series: [
+      {
+        type: 'heatmap',
+        data: cells,
+        label: {
+          show: true,
+          color: ink.primary,
+          fontSize: 11,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          formatter: (p: any) => String(p.data[2]),
+        },
+        itemStyle: { borderColor: dark ? '#1a1a19' : '#fcfcfb', borderWidth: 2 },
+        emphasis: { itemStyle: { shadowBlur: 6, shadowColor: 'rgba(0,0,0,0.3)' } },
       },
     ],
   }

@@ -1,6 +1,6 @@
 import * as echarts from 'echarts/core'
 import type { EChartsOption } from 'echarts'
-import { BarChart, CandlestickChart, LineChart, ScatterChart } from 'echarts/charts'
+import { BarChart, CandlestickChart, HeatmapChart, LineChart, ScatterChart } from 'echarts/charts'
 import {
   DataZoomComponent,
   GridComponent,
@@ -9,6 +9,7 @@ import {
   MarkPointComponent,
   TitleComponent,
   TooltipComponent,
+  VisualMapComponent,
 } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import { useEffect, useRef } from 'react'
@@ -17,6 +18,7 @@ import { useIsDarkMode } from '../theme/useIsDarkMode'
 echarts.use([
   BarChart,
   CandlestickChart,
+  HeatmapChart,
   LineChart,
   ScatterChart,
   DataZoomComponent,
@@ -26,6 +28,7 @@ echarts.use([
   MarkPointComponent,
   TitleComponent,
   TooltipComponent,
+  VisualMapComponent,
   CanvasRenderer,
 ])
 

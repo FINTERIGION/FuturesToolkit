@@ -72,6 +72,24 @@ class OptimizeRequest(BaseModel):
     study_name: Optional[str] = None
 
 
+class FactorReportRequest(BaseModel):
+    factor: str
+    symbols: List[str]
+    start: str
+    end: str
+    horizons: List[int] = Field(default_factory=lambda: [1, 5, 10, 20])
+    return_source: str = 'weighted'
+    n_groups: int = 3
+    params: Dict[str, object] = Field(default_factory=dict)
+
+
+class FactorCorrRequest(BaseModel):
+    symbols: List[str]
+    start: str
+    end: str
+    horizon: int = 5
+
+
 class SignalRequest(BaseModel):
     strategy: Optional[str] = None
     model: Optional[str] = None

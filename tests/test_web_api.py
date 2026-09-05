@@ -865,3 +865,117 @@ def test_jobs_listing_omits_trial_telemetry_but_the_detail_view_keeps_it(client)
 
     detail = client.get(f'/api/jobs/{job.id}').json()
     assert detail['progress_data'] == [{'trial': 0, 'value': 1.0}]
+
+
+# ---------------------------------------------------------------------
+# Factors router
+# ---------------------------------------------------------------------
+
+def test_list_and_get_factor(client):
+    listing = client.get('/api/factors').json()
+    keys = {f['key'] for f in listing}
+    assert {'momentum', 'volatility', 'carry', 'trend_accel'} <= keys
+
+    detail = client.get('/api/factors/momentum').json()
+    assert detail['class_name'] == 'MomentumFactor'
+    assert 'lookback' in detail['params']
+    assert detail['direction'] == 1
+
+
+def test_get_unknown_factor_is_404(client):
+    resp = client.get('/api/factors/does-not-exist')
+    assert resp.status_code == 404
+
+
+def test_factor_report_end_to_end_through_the_api(client, tmp_path, monkeypatch):
+    import web.routers.factors as factors_router
+    # Same trick as test_optimize_run_is_persisted_into_run_history: redirect
+    # the module-level results directory the router's closures read at call
+    # time, so this run's JSON lands in tmp_path rather than the repo's real
+    # results/factors/.
+    monkeypatch.setattr(factors_router, 'FACTOR_RESULTS_DIR', str(tmp_path))
+
+    resp = client.post('/api/factors/report', json={
+        'factor': 'momentum',
+        'symbols': ['SA', 'CF'],
+        'start': '2024-01-01',
+        'end': '2024-06-01',
+        'horizons': [1, 5],
+        'n_groups': 2,
+    })
+    assert resp.status_code == 200, resp.text
+    job_id = resp.json()['job_id']
+
+    job = None
+    for _ in range(200):
+        job = client.get(f'/api/jobs/{job_id}').json()
+        if job['status'] in ('done', 'error'):
+            break
+        time.sleep(0.1)
+    assert job['status'] == 'done', job
+    json.loads(json.dumps(job))  # strict-JSON safety, same as the backtest test
+
+    report = job['result']['report']
+    assert report['factor'] == 'MomentumFactor'
+    assert set(report['ic_decay']) == {'1', '5'}
+    assert len(report['ic_curve']['dates']) == len(report['ic_curve']['cumulative_ic'])
+    assert len(report['quantile_curve']['dates']) == len(report['quantile_curve']['curves'])
+
+    listing = client.get('/api/factors/reports').json()
+    assert listing, 'expected the just-written report to show up in the listing'
+    name = listing[0]['name']
+    detail = client.get(f'/api/factors/reports/{name}').json()
+    assert detail['factor'] == 'MomentumFactor'
+
+
+def test_factor_corr_end_to_end_through_the_api(client, tmp_path, monkeypatch):
+    import web.routers.factors as factors_router
+    monkeypatch.setattr(factors_router, 'FACTOR_RESULTS_DIR', str(tmp_path))
+
+    resp = client.post('/api/factors/corr', json={
+        'symbols': ['SA', 'CF'],
+        'start': '2024-01-01',
+        'end': '2024-06-01',
+        'horizon': 5,
+    })
+    assert resp.status_code == 200, resp.text
+    job_id = resp.json()['job_id']
+
+    job = None
+    for _ in range(200):
+        job = client.get(f'/api/jobs/{job_id}').json()
+        if job['status'] in ('done', 'error'):
+            break
+        time.sleep(0.1)
+    assert job['status'] == 'done', job
+    json.loads(json.dumps(job))
+
+    report = job['result']['report']
+    names = {r['factor'] for r in report['correlation_matrix']}
+    assert {'momentum', 'volatility', 'carry', 'trend_accel'} <= names
+    names_ic = {r['factor'] for r in report['ic_correlation']}
+    assert names_ic == names
+
+
+def test_factor_report_unknown_factor_is_422(client):
+    resp = client.post('/api/factors/report', json={
+        'factor': 'does-not-exist', 'symbols': ['SA'], 'start': '2024-01-01', 'end': '2024-06-01',
+    })
+    assert resp.status_code == 422
+
+
+def test_factor_report_unknown_symbol_is_422(client):
+    resp = client.post('/api/factors/report', json={
+        'factor': 'momentum', 'symbols': ['ZZ'], 'start': '2024-01-01', 'end': '2024-06-01',
+    })
+    assert resp.status_code == 422
+
+
+def test_get_unknown_report_name_is_404(client):
+    resp = client.get('/api/factors/reports/does-not-exist.json')
+    assert resp.status_code == 404
+
+
+def test_report_name_must_end_in_json(client):
+    resp = client.get('/api/factors/reports/not-a-json-file')
+    assert resp.status_code == 400

@@ -4,6 +4,10 @@ import type {
   CompareResult,
   Coverage,
   ExchangeMeta,
+  FactorCorrResult,
+  FactorInfo,
+  FactorReport,
+  FactorReportSummary,
   JobState,
   OptimizeReport,
   OptimizeReportSummary,
@@ -127,4 +131,42 @@ export const jobsApi = {
   get: (id: string) => api.get<JobState>(`/jobs/${id}`),
   cancel: (id: string) => api.post<{ cancelled: string }>(`/jobs/${id}/cancel`),
   streamUrl: (id: string) => `/api/jobs/${id}/stream`,
+}
+
+export interface FactorReportParams {
+  factor: string
+  symbols: string[]
+  start: string
+  end: string
+  horizons: number[]
+  return_source: string
+  n_groups: number
+  params: Record<string, unknown>
+}
+
+export interface FactorCorrParams {
+  symbols: string[]
+  start: string
+  end: string
+  horizon: number
+}
+
+export const factorsApi = {
+  list: () => api.get<FactorInfo[]>('/factors'),
+  get: (key: string) => api.get<FactorInfo>(`/factors/${key}`),
+  startReport: (body: FactorReportParams) => api.post<{ job_id: string }>('/factors/report', body),
+  startCorr: (body: FactorCorrParams) => api.post<{ job_id: string }>('/factors/corr', body),
+  reports: () => api.get<FactorReportSummary[]>('/factors/reports'),
+  report: (name: string) => api.get<FactorReport>(`/factors/reports/${name}`),
+}
+
+// job.result shapes for the two factor job kinds (see web/routers/factors.py)
+export interface FactorReportJobResult {
+  path: string
+  report: FactorReport
+}
+
+export interface FactorCorrJobResult {
+  path: string
+  report: FactorCorrResult
 }

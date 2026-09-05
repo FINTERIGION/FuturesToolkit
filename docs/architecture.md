@@ -4,6 +4,7 @@
 FuturesToolkit/
 ├── runner.py                  # Backtest CLI
 ├── research_runner.py         # Research CLI: show-space / optimize / holdout
+├── factor_runner.py           # Factor CLI: list / show-space / ic / quantiles / report / corr
 ├── meta_runner.py             # Meta-labeling CLI: harvest / walkforward / holdout / fit / signal
 ├── live_runner.py             # Live signal CLI: next session's targets, any strategy
 ├── plotting.py                # Chart generation
@@ -21,7 +22,13 @@ FuturesToolkit/
 │   ├── double_ma.py
 │   ├── rsi_mean_reversion.py
 │   ├── cross_sectional_momentum.py
+│   ├── cross_section.py       #   CrossSectionMixin: rank a score, hold the extremes, size the legs
+│   ├── factor_bridge.py       #   auto-generates a tunable Strategy per discovered factor
 │   └── my_strategy.py
+├── factors/                   # Factor scores (tracked examples) + private modules (gitignored)
+│   ├── base.py                #   Factor / FactorContext / FactorPanel / compute_factor
+│   ├── primitives.py          #   ts_* / cs_* operator library
+│   ├── momentum.py, volatility.py, carry.py
 ├── datafeed/                  # Data pipeline
 │   ├── sources.py             #   per-exchange download & cache adapters (CZCE / SHFE / DCE)
 │   ├── data_update.py         #   OI-weighted aggregation & CSV output
@@ -35,7 +42,9 @@ FuturesToolkit/
 │   ├── runner_api.py          #   single-window backtest with a leak-safe warmup pad
 │   ├── objective.py           #   Optuna trial scoring
 │   ├── optimize.py            #   study driver + holdout evaluation
-│   └── overfit.py             #   PBO (CSCV), Deflated Sharpe, IS/OOS decay, plateau check
+│   ├── overfit.py             #   PBO (CSCV), Deflated Sharpe, IS/OOS decay, plateau check
+│   ├── factor_eval.py         #   forward returns, IC, quantile buckets, turnover, decay, annual slices
+│   └── factor_corr.py         #   cross-sectional and IC correlation between factors
 ├── meta/                      # Meta-labeling (strategy-agnostic)
 │   ├── features.py            #   one feature definition, shared by training and inference
 │   ├── dataset.py             #   trade log -> (X, y, w), purge rule
@@ -58,7 +67,7 @@ FuturesToolkit/
 ├── tests/                     # pytest suite (synthetic MarketData fixtures)
 ├── data/                      # Generated CSVs (gitignored)
 ├── cache/                     # Raw exchange payloads per venue: cache/{CZCE,SHFE,DCE}/ (gitignored)
-└── results/                   # Backtest outputs (gitignored), incl. results/optuna, results/meta, results/live, results/web
+└── results/                   # Backtest outputs (gitignored), incl. results/optuna, results/factors, results/meta, results/live, results/web
 ```
 
 ## Tests

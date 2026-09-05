@@ -28,3 +28,15 @@ strategies/*
 !strategies/rsi_mean_reversion.py
 !strategies/my_strategy.py
 !strategies/cross_sectional_momentum.py
+!strategies/cross_section.py
+!strategies/factor_bridge.py
+
+# Private factors: same convention as strategies/ -- ignore custom modules,
+# keep base + the bundled examples
+factors/*
+!factors/__init__.py
+!factors/base.py
+!factors/primitives.py
+!factors/momentum.py
+!factors/volatility.py
+!factors/carry.py

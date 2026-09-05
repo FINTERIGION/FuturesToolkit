@@ -53,6 +53,7 @@ the person at the keyboard:
 | Data | Coverage table (rows, date range, staleness) and a job to download/rebuild per product |
 | Backtest | Run any discovered strategy over a date range; equity curve, drawdown, position, price & signals, trade log, per-symbol and per-exit-reason breakdowns |
 | Optimize | Optuna anchored walk-forward search with a live trial-by-trial progress chart, fold scores, overfitting diagnostics, and the once-only holdout check |
+| Factors | Judge a predictive score directly: IC decay, annual stability, quantile-bucket net value, turnover, factor autocorrelation, and a cross-factor correlation heatmap -- see [Factors](factors.md) |
 | Signals | Next session's target positions, for a plain strategy or a meta-gated one |
 | Runs | Every backtest/optimize run, indexed for reopening and side-by-side comparison |
 
@@ -67,7 +68,7 @@ web/                      FastAPI backend
   store.py                  SQLite run-history index (results/webpanel.db)
   serialize.py              JSON-safe conversion (inf/NaN/date/numpy)
   schemas.py                Pydantic request models
-  routers/                  products, data, strategies, backtest, optimize, signals, runs, jobs
+  routers/                  products, data, strategies, backtest, optimize, factors, signals, runs, jobs
 
 webui/                    Vite + React + TypeScript frontend
   src/api/                   Typed fetch client + endpoint functions
@@ -147,6 +148,13 @@ Two things track "past runs," on purpose:
   compare across kinds without re-parsing every JSON report. Equity curves
   and trade logs live in `results/web/{run_id}.json`, not in the database
   row, to keep the index small.
+
+Factor reports follow the Optuna pattern, not the Runs-page one: they are
+not "runs" (no equity curve, no strategy) and never touch `webpanel.db`.
+`research.factor_report.save_report` writes `results/factors/*.json`
+identically whether called from `factor_runner.py` or from
+`web/routers/factors.py`, and `GET /api/factors/reports` lists that
+directory directly -- a report saved from either side shows up for both.
 
 ### JSON safety
 

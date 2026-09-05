@@ -29,7 +29,7 @@ web = [
 ]
 
 [tool.setuptools]
-packages = ["core", "datafeed", "strategies", "research", "meta", "live", "web"]
+packages = ["core", "datafeed", "strategies", "research", "meta", "live", "web", "factors"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

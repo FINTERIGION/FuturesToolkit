@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 
 from core.engine import Engine
-from core.market import slice_market
+from core.market import ContractSeries, slice_market
 from core.params import Int
 from strategies import discover_strategies
 from strategies.base import BarContext, SetupContext, Strategy
@@ -41,6 +41,36 @@ def _trending_market(n_bars: int = 900, seed: int = 0):
     (tests/conftest.py): a trend plus a ~15-bar cycle, so both a crossover and
     a mean-reversion strategy generate real trades."""
     return build_trending_market(('SA',), n_bars=n_bars, seed=seed)
+
+
+def _multi_contract_trending_market(n_bars: int = 900, seed: int = 0):
+    """``_trending_market`` plus two extra, properly-coded (4-digit YYMM)
+    contracts that ``contract_by_bar`` never points to and fills never touch.
+
+    A term-structure/carry factor needs at least two simultaneously live,
+    parseable contracts to compare (``ProductPanel.contracts``), which the
+    shared single-contract fixture cannot offer -- its one contract
+    (``{symbol}C1``) has no delivery month `datafeed.roll_calendar` can parse
+    at all, by design (nothing about fills depends on it having one). Adding
+    two more, independent of the original, gives a calendar-spread factor
+    something real to read without changing anything the single-contract
+    fixture's own assertions (fills, warmup, ``next(iter(panel.contracts))``)
+    depend on.
+    """
+    base = _trending_market(n_bars=n_bars, seed=seed)
+    for sym, panel in base.products.items():
+        near = next(iter(panel.contracts.values()))
+        near_ohlcv = near.ohlcv.copy()
+        far_ohlcv = near_ohlcv.copy()
+        far_ohlcv[:, :5] += 5.0  # open/high/low/close/settle: a real, non-degenerate slope
+        live_bars = near.live_bars.copy()
+        panel.contracts[f'{sym}2401'] = ContractSeries(
+            code=f'{sym}2401', start=near.start, live_bars=live_bars, ohlcv=near_ohlcv,
+        )
+        panel.contracts[f'{sym}2405'] = ContractSeries(
+            code=f'{sym}2405', start=near.start, live_bars=live_bars, ohlcv=far_ohlcv,
+        )
+    return base
 
 
 def _crashing_market(sym: str = 'AU', n_bars: int = 600, crash_bar: int = 400):
@@ -402,7 +432,13 @@ def test_resolve_params_precedence(tmp_path):
 # ---------------------------------------------------------------------
 
 @pytest.mark.parametrize('name', sorted(TUNABLE_STRATEGIES))
-def test_optimize_run_study_end_to_end(market, name, tmp_path):
+def test_optimize_run_study_end_to_end(name, tmp_path):
+    # Not the shared single-contract `market` fixture: a bridged calendar-
+    # spread factor (e.g. `factor_carry`) needs a second live contract to
+    # produce anything but an all-NaN score, which the shared fixture's one
+    # unparseable contract code cannot offer -- see
+    # `_multi_contract_trending_market`.
+    market = _multi_contract_trending_market()
     cls = TUNABLE_STRATEGIES[name]
     out = run_study(
         strategy_cls=cls, symbols=['SA'], market=market,
@@ -494,7 +530,7 @@ def test_packaged_modules_do_not_import_top_level_scripts():
     import pathlib
 
     root = pathlib.Path(__file__).resolve().parent.parent
-    packaged = ('core', 'datafeed', 'strategies', 'research', 'meta', 'live')
+    packaged = ('core', 'datafeed', 'strategies', 'research', 'meta', 'live', 'factors')
     top_level = {p.stem for p in root.glob('*.py')}
     assert {'runner', 'plotting'} <= top_level      # guard the premise
 
