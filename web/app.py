@@ -1,12 +1,12 @@
 """FastAPI app for the FuturesToolkit web panel.
 
-Run with ``python -m web.app`` (dev) or ``uvicorn web.app:app`` (prod-ish,
-still single-process/single-machine -- see the binding note below).
+Run with ``python ft.py web`` (which owns the CLI flags and the
+bind-address warning) or ``uvicorn web.app:app`` (prod-ish, still
+single-process/single-machine).
 """
 
 from __future__ import annotations
 
-import argparse
 import logging
 import os
 
@@ -15,8 +15,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from web.config import DEFAULT_HOST, DEFAULT_PORT, STATIC_DIR, is_within
-from web.routers import backtest, data, factors, jobs, optimize, products, runs, signals, strategies
+from web.config import STATIC_DIR, is_within
+from web.routers import backtest, data, jobs, optimize, products, runs, strategies
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(name)s %(message)s')
 
@@ -33,7 +33,7 @@ app.add_middleware(
     allow_headers=['*'],
 )
 
-for router in (products, data, strategies, backtest, optimize, factors, signals, runs, jobs):
+for router in (products, data, strategies, backtest, optimize, runs, jobs):
     app.include_router(router.router)
 
 
@@ -79,26 +79,3 @@ if os.path.isdir(STATIC_DIR):
         if full_path and is_within(candidate, _STATIC_ROOT) and os.path.isfile(candidate):
             return FileResponse(candidate)
         return FileResponse(os.path.join(_STATIC_ROOT, 'index.html'))
-
-
-def main() -> None:
-    import uvicorn
-
-    parser = argparse.ArgumentParser(description='FuturesToolkit web panel.')
-    parser.add_argument('--host', default=DEFAULT_HOST)
-    parser.add_argument('--port', type=int, default=DEFAULT_PORT)
-    parser.add_argument('--reload', action='store_true')
-    args = parser.parse_args()
-
-    if args.host not in ('127.0.0.1', 'localhost'):
-        logging.getLogger('futurestoolkit.web').warning(
-            'Binding to %s: this panel has no authentication and can rewrite the '
-            'product registry and delete data files. Only do this on a network '
-            'you trust.', args.host,
-        )
-
-    uvicorn.run('web.app:app', host=args.host, port=args.port, reload=args.reload)
-
-
-if __name__ == '__main__':
-    main()

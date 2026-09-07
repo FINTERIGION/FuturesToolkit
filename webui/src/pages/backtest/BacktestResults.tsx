@@ -62,7 +62,7 @@ export function BacktestResults({ runId }: { runId: string }) {
 
   const tradeColumns: Column<TradeLog>[] = [
     { key: 'symbol', header: t('common.symbols'), render: (r) => r.symbol },
-    { key: 'direction', header: t('signals.action'), render: (r) => r.direction },
+    { key: 'direction', header: t('backtest.direction'), render: (r) => r.direction },
     { key: 'open_date', header: t('common.start'), render: (r) => r.open_date },
     { key: 'close_date', header: t('common.end'), render: (r) => r.close_date ?? '—' },
     { key: 'size', header: 'Size', render: (r) => r.size },

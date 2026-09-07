@@ -2,8 +2,8 @@
 
 Responses are deliberately plain dicts (built by each router, run through
 ``web.serialize.jsonable``) rather than response models: the payloads mirror
-whatever the engine already returns (``compute_metrics``, ``SignalReport``,
-Optuna reports), and re-declaring their shape here would be a second copy of
+whatever the engine already returns (``compute_metrics``, Optuna reports),
+and re-declaring their shape here would be a second copy of
 core/metrics.py's field list that drifts the moment a field is added there.
 Requests get real models because they are hand-authored by this layer and
 validation here is what turns a bad form submission into a clean 422 instead
@@ -48,7 +48,6 @@ class BacktestRequest(BaseModel):
     cash: float = 100_000.0
     slippage: float = 0.0
     params: Dict[str, object] = Field(default_factory=dict)
-    meta_model: Optional[str] = None
 
 
 class OptimizeRequest(BaseModel):
@@ -70,32 +69,3 @@ class OptimizeRequest(BaseModel):
     seed: int = 42
     probe_samples: int = 20
     study_name: Optional[str] = None
-
-
-class FactorReportRequest(BaseModel):
-    factor: str
-    symbols: List[str]
-    start: str
-    end: str
-    horizons: List[int] = Field(default_factory=lambda: [1, 5, 10, 20])
-    return_source: str = 'weighted'
-    n_groups: int = 3
-    params: Dict[str, object] = Field(default_factory=dict)
-
-
-class FactorCorrRequest(BaseModel):
-    symbols: List[str]
-    start: str
-    end: str
-    horizon: int = 5
-
-
-class SignalRequest(BaseModel):
-    strategy: Optional[str] = None
-    model: Optional[str] = None
-    symbols: Optional[List[str]] = None
-    start: str = '2015-01-01'
-    end: str = '2026-12-31'
-    cash: Optional[float] = None
-    slippage: Optional[float] = None
-    params: Dict[str, object] = Field(default_factory=dict)

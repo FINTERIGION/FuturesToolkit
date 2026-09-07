@@ -10,6 +10,7 @@ its ``params`` defaults. Nothing here knows about any concrete strategy --
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Optional
 
@@ -80,7 +81,7 @@ def resolve_space(strategy_cls: type, overrides: Optional[dict] = None) -> dict:
     if inferred:
         logger.info(
             "%s: no `space` declared for %s -- inferred %s from defaults; "
-            "run `research_runner.py show-space --strategy ...` to inspect "
+            "run `ft.py show-space --strategy ...` to inspect "
             "and consider promoting these into the strategy's own `space`.",
             strategy_cls.__name__, ', '.join(sorted(inferred)), inferred,
         )
@@ -159,3 +160,61 @@ def parse_param_override(spec: str) -> tuple:
         return name, Categorical(tuple(args[0].split('|')))
 
     raise ValueError(f"Unknown space kind {kind!r} in --param {spec!r}")
+
+
+# ---------------------------------------------------------------------
+# Concrete parameter *values* (as opposed to the search ranges above)
+# ---------------------------------------------------------------------
+
+def parse_param_value(raw: str) -> tuple:
+    """Parse one ``name=value`` CLI token into ``(name, value)``, casting the
+    value to int, then float, then bool, else leaving it a string.
+
+    Distinct from :func:`parse_param_override` above, which reads
+    ``name=kind:args`` and declares a search *range*. ``ft.py backtest``
+    takes this form; ``ft.py optimize`` takes that one.
+    """
+    if '=' not in raw:
+        raise ValueError(f"Invalid --param {raw!r}; expected name=value")
+    name, value = raw.split('=', 1)
+    for caster in (int, float):
+        try:
+            return name, caster(value)
+        except ValueError:
+            continue
+    if value.lower() in ('true', 'false'):
+        return name, value.lower() == 'true'
+    return name, value
+
+
+def resolve_params(strategy_cls: type, args) -> dict:
+    """Build the ``strategy_cls(**overrides)`` dict from the CLI, lowest
+    precedence first: an optimize report's ``best_params``, then ``--lots``,
+    then ``--param``. Only what the user actually asked to change is returned
+    -- ``Strategy.__init__`` merges the class's own ``params`` defaults under
+    it -- so an untouched run behaves exactly as before.
+    """
+    params: dict = {}
+    if getattr(args, 'params_from', None):
+        with open(args.params_from, encoding='utf-8') as f:
+            best = json.load(f)['best_params']
+        params.update(best)
+        logger.info('Params from %s: %s', args.params_from, best)
+    if getattr(args, 'lots', None) is not None:
+        params['lots'] = args.lots
+    for raw in getattr(args, 'param', None) or []:
+        name, value = parse_param_value(raw)
+        params[name] = value
+
+    known = set(getattr(strategy_cls, 'params', {}) or {})
+    unknown = sorted(set(params) - known)
+    if unknown:
+        # Not fatal: `Strategy.__init__` merges anything into `self.p`, and
+        # `--lots` is documented as harmless for strategies that ignore it.
+        # But a typo would otherwise vanish without a trace, so say so.
+        logger.warning(
+            '%s declares no param(s) %s -- passing them through, but the strategy '
+            'will not read them (declared params: %s).',
+            strategy_cls.__name__, unknown, sorted(known) or '<none>',
+        )
+    return params

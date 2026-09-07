@@ -2,7 +2,7 @@
 walk-forward search with holdout isolation and post-hoc overfitting
 diagnostics.
 
-``run_study`` is the only entry point research_runner.py needs. It:
+``run_study`` is the only entry point ``ft.py optimize`` needs. It:
 
 1. Loads market data once.
 2. Resolves the search space (declared / inferred / CLI-overridden).

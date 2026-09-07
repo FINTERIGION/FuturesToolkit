@@ -15,7 +15,7 @@ from research.objective import DEFAULT_SPARSE_PENALTY
 from research.optimize import RESULTS_DIR as OPTUNA_RESULTS_DIR
 from research.optimize import evaluate_holdout, run_study
 from research.space import parse_param_override
-from strategies import load_strategy
+from strategies import load_registered_strategy
 
 from web import store
 from web.jobs import manager as job_manager
@@ -43,7 +43,7 @@ def _optimize_metrics(report: dict) -> dict:
 @router.post('')
 def start_optimize(body: OptimizeRequest):
     try:
-        strategy_cls = load_strategy(body.strategy)
+        strategy_cls = load_registered_strategy(body.strategy)
         symbols = require_products(body.symbols)
     except KeyError as e:
         raise HTTPException(status_code=422, detail=str(e)) from e

@@ -17,8 +17,8 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import os
+import sys
 import threading
 import time
 
@@ -31,7 +31,7 @@ import web.marketcache as marketcache_module
 import web.store as store_module
 from tests.conftest import build_trending_market
 from web.app import app
-from web.config import MODELS_DIR, STATIC_DIR, resolve_model_path
+from web.config import STATIC_DIR
 from web.jobs import JobManager
 from web.serialize import annotate_inf_metrics, jsonable
 
@@ -403,12 +403,10 @@ def test_optimize_run_is_persisted_into_run_history(client, tmp_path, monkeypatc
 # ---------------------------------------------------------------------
 # Path confinement
 #
-# Two request fields name a filesystem path, and both used to reach the
-# filesystem unfiltered: the SPA catch-all's URL, and the meta-model path in
-# a backtest/signal body. Neither is reachable through the UI -- a browser
-# collapses `..` before the request leaves, and the model box is a free-text
-# field a user types a real path into -- which is exactly why the guards
-# need tests rather than manual checking.
+# The SPA catch-all's URL reaches the filesystem, and used to do so
+# unfiltered. It is not reachable through the UI -- a browser collapses
+# `..` before the request leaves -- which is exactly why the guard needs a
+# test rather than manual checking.
 # ---------------------------------------------------------------------
 
 def _raw_get(path: str) -> tuple:
@@ -455,7 +453,7 @@ def _raw_get(path: str) -> tuple:
     ('/../../datafeed/products.json', b'"exchange"'),
     ('/../../results/webpanel.db', b'SQLite format'),
     ('/../../../../../../etc/passwd', b'root:'),
-    ('/../../models/fintermom.joblib', b'sklearn'),
+    ('/../../pyproject.toml', b'futurestoolkit'),
     ('/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/etc/passwd', b'root:'),
     ('/assets/../../../../../../../../etc/passwd', b'root:'),
 ])
@@ -479,53 +477,6 @@ def test_spa_route_still_serves_real_build_files():
     status, body = _raw_get('/favicon.svg')
     assert status == 200
     assert b'<svg' in body
-
-
-@pytest.mark.parametrize('raw', [
-    'models/fintermom.joblib',   # the Signals page placeholder and the CLI docs
-    'fintermom.joblib',          # bare name
-    './models/fintermom.joblib',
-])
-def test_resolve_model_path_accepts_the_spellings_already_in_use(raw):
-    assert resolve_model_path(raw) == os.path.join(MODELS_DIR, 'fintermom.joblib')
-
-
-@pytest.mark.parametrize('raw', [
-    '/etc/passwd', '../datafeed/products.json', 'models/../../../etc/passwd',
-    '../../../../tmp/evil.joblib', '/proc/self/environ', '', '   ',
-])
-def test_resolve_model_path_rejects_anything_outside_models(raw):
-    with pytest.raises(ValueError):
-        resolve_model_path(raw)
-
-
-def test_resolve_model_path_follows_symlinks_before_deciding():
-    """A symlink planted in ``models/`` must not launder an outside target --
-    the check runs on the resolved path, not the one that was asked for."""
-    link = os.path.join(MODELS_DIR, '_pytest_escape_link.joblib')
-    if os.path.exists(link) or os.path.islink(link):
-        pytest.skip('name already taken')
-    os.makedirs(MODELS_DIR, exist_ok=True)
-    os.symlink('/etc/passwd', link)
-    try:
-        with pytest.raises(ValueError):
-            resolve_model_path('_pytest_escape_link.joblib')
-    finally:
-        os.unlink(link)
-
-
-@pytest.mark.parametrize('endpoint,payload', [
-    ('/api/backtest', {'strategy': 'double_ma', 'symbols': ['SA'],
-                       'start': '2024-01-01', 'end': '2024-03-01'}),
-    ('/api/signals', {'symbols': ['SA']}),
-])
-def test_out_of_tree_model_path_is_422_before_anything_is_unpickled(client, endpoint, payload):
-    """``joblib.load`` unpickles, so the rejection has to happen before the
-    file is opened -- a 422 naming the path, not a traceback out of joblib."""
-    field = 'meta_model' if endpoint == '/api/backtest' else 'model'
-    resp = client.post(endpoint, json={**payload, field: '/etc/passwd'})
-    assert resp.status_code == 422, resp.text
-    assert 'outside' in str(resp.json()['detail'])
 
 
 # ---------------------------------------------------------------------
@@ -868,114 +819,114 @@ def test_jobs_listing_omits_trial_telemetry_but_the_detail_view_keeps_it(client)
 
 
 # ---------------------------------------------------------------------
-# Factors router
+# A strategy name arriving over HTTP never reaches importlib
 # ---------------------------------------------------------------------
 
-def test_list_and_get_factor(client):
-    listing = client.get('/api/factors').json()
-    keys = {f['key'] for f in listing}
-    assert {'momentum', 'volatility', 'carry', 'trend_accel'} <= keys
+def _import_probe(tmp_path, monkeypatch, name: str):
+    """Put an importable module on ``sys.path`` that leaves a file behind if
+    it is ever imported, and return that marker path.
 
-    detail = client.get('/api/factors/momentum').json()
-    assert detail['class_name'] == 'MomentumFactor'
-    assert 'lookback' in detail['params']
-    assert detail['direction'] == 1
+    Asserting on the marker rather than on the response alone is the point:
+    ``load_strategy``'s ``'module:Class'`` form imports first and checks the
+    result is a ``Strategy`` second, so a 4xx is perfectly compatible with
+    the module's top-level code having already run.
+    """
+    marker = tmp_path / f'{name}.imported'
+    (tmp_path / f'{name}.py').write_text(
+        'import pathlib\n'
+        f'pathlib.Path({str(marker)!r}).write_text("imported")\n'
+        'class NotAStrategy:\n'
+        '    pass\n',
+        encoding='utf-8',
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    return marker
 
 
-def test_get_unknown_factor_is_404(client):
-    resp = client.get('/api/factors/does-not-exist')
-    assert resp.status_code == 404
-
-
-def test_factor_report_end_to_end_through_the_api(client, tmp_path, monkeypatch):
-    import web.routers.factors as factors_router
-    # Same trick as test_optimize_run_is_persisted_into_run_history: redirect
-    # the module-level results directory the router's closures read at call
-    # time, so this run's JSON lands in tmp_path rather than the repo's real
-    # results/factors/.
-    monkeypatch.setattr(factors_router, 'FACTOR_RESULTS_DIR', str(tmp_path))
-
-    resp = client.post('/api/factors/report', json={
-        'factor': 'momentum',
-        'symbols': ['SA', 'CF'],
-        'start': '2024-01-01',
-        'end': '2024-06-01',
-        'horizons': [1, 5],
-        'n_groups': 2,
+def test_backtest_refuses_a_module_path_strategy_without_importing_it(client, tmp_path, monkeypatch):
+    marker = _import_probe(tmp_path, monkeypatch, 'ftk_probe_backtest')
+    resp = client.post('/api/backtest', json={
+        'strategy': 'ftk_probe_backtest:NotAStrategy',
+        'symbols': ['SA'], 'start': '2024-01-01', 'end': '2024-06-01',
     })
-    assert resp.status_code == 200, resp.text
-    job_id = resp.json()['job_id']
-
-    job = None
-    for _ in range(200):
-        job = client.get(f'/api/jobs/{job_id}').json()
-        if job['status'] in ('done', 'error'):
-            break
-        time.sleep(0.1)
-    assert job['status'] == 'done', job
-    json.loads(json.dumps(job))  # strict-JSON safety, same as the backtest test
-
-    report = job['result']['report']
-    assert report['factor'] == 'MomentumFactor'
-    assert set(report['ic_decay']) == {'1', '5'}
-    assert len(report['ic_curve']['dates']) == len(report['ic_curve']['cumulative_ic'])
-    assert len(report['quantile_curve']['dates']) == len(report['quantile_curve']['curves'])
-
-    listing = client.get('/api/factors/reports').json()
-    assert listing, 'expected the just-written report to show up in the listing'
-    name = listing[0]['name']
-    detail = client.get(f'/api/factors/reports/{name}').json()
-    assert detail['factor'] == 'MomentumFactor'
+    assert resp.status_code == 422, resp.text
+    assert not marker.exists(), 'the request body got to import a module'
+    assert 'ftk_probe_backtest' not in sys.modules
 
 
-def test_factor_corr_end_to_end_through_the_api(client, tmp_path, monkeypatch):
-    import web.routers.factors as factors_router
-    monkeypatch.setattr(factors_router, 'FACTOR_RESULTS_DIR', str(tmp_path))
-
-    resp = client.post('/api/factors/corr', json={
-        'symbols': ['SA', 'CF'],
-        'start': '2024-01-01',
-        'end': '2024-06-01',
-        'horizon': 5,
+def test_optimize_refuses_a_module_path_strategy_without_importing_it(client, tmp_path, monkeypatch):
+    marker = _import_probe(tmp_path, monkeypatch, 'ftk_probe_optimize')
+    resp = client.post('/api/optimize', json={
+        'strategy': 'ftk_probe_optimize:NotAStrategy',
+        'symbols': ['SA'], 'start': '2024-01-01', 'end': '2024-06-01',
     })
-    assert resp.status_code == 200, resp.text
-    job_id = resp.json()['job_id']
-
-    job = None
-    for _ in range(200):
-        job = client.get(f'/api/jobs/{job_id}').json()
-        if job['status'] in ('done', 'error'):
-            break
-        time.sleep(0.1)
-    assert job['status'] == 'done', job
-    json.loads(json.dumps(job))
-
-    report = job['result']['report']
-    names = {r['factor'] for r in report['correlation_matrix']}
-    assert {'momentum', 'volatility', 'carry', 'trend_accel'} <= names
-    names_ic = {r['factor'] for r in report['ic_correlation']}
-    assert names_ic == names
+    assert resp.status_code == 422, resp.text
+    assert not marker.exists(), 'the request body got to import a module'
+    assert 'ftk_probe_optimize' not in sys.modules
 
 
-def test_factor_report_unknown_factor_is_422(client):
-    resp = client.post('/api/factors/report', json={
-        'factor': 'does-not-exist', 'symbols': ['SA'], 'start': '2024-01-01', 'end': '2024-06-01',
-    })
-    assert resp.status_code == 422
+def test_strategy_detail_refuses_a_module_path_key_without_importing_it(client, tmp_path, monkeypatch):
+    marker = _import_probe(tmp_path, monkeypatch, 'ftk_probe_detail')
+    resp = client.get('/api/strategies/ftk_probe_detail:NotAStrategy')
+    assert resp.status_code == 404, resp.text
+    assert not marker.exists(), 'the URL path got to import a module'
+    assert 'ftk_probe_detail' not in sys.modules
 
 
-def test_factor_report_unknown_symbol_is_422(client):
-    resp = client.post('/api/factors/report', json={
-        'factor': 'momentum', 'symbols': ['ZZ'], 'start': '2024-01-01', 'end': '2024-06-01',
-    })
-    assert resp.status_code == 422
+def test_registry_only_loader_rejects_what_the_cli_loader_still_accepts():
+    """The two loaders are deliberately not interchangeable.
+
+    ``ft.py`` keeps the ``'module:Class'`` escape hatch -- an argv is already
+    running as the user -- while every web entry point is restricted to names
+    the registry actually discovered.
+    """
+    from strategies import load_registered_strategy, load_strategy
+
+    assert load_strategy('strategies.double_ma:DoubleMaStrategy') is load_strategy('double_ma')
+    assert load_registered_strategy('double_ma') is load_strategy('double_ma')
+    with pytest.raises(KeyError):
+        load_registered_strategy('strategies.double_ma:DoubleMaStrategy')
 
 
-def test_get_unknown_report_name_is_404(client):
-    resp = client.get('/api/factors/reports/does-not-exist.json')
-    assert resp.status_code == 404
+# ---------------------------------------------------------------------
+# Run history is bounded, on disk as well as in the index
+# ---------------------------------------------------------------------
+
+def test_run_history_prunes_oldest_rows_and_their_artifact_files(monkeypatch):
+    """Rows *and* files: an artifact left behind after its row is gone is
+    unreachable from the panel, so it would leak megabytes per backtest with
+    nothing able to find it again."""
+    monkeypatch.setattr(store_module, 'RUN_RETENTION', 3)
+
+    ids = []
+    for i in range(6):
+        run_id = store_module.create_run(kind='backtest', strategy=f'S{i}', symbols=['SA'])
+        store_module.finish_run(run_id, status='done', metrics={'sharpe_ratio': i},
+                                artifact={'equity_records': [{'date': '2024-01-01', 'equity': i}]})
+        ids.append(run_id)
+
+    kept = {r['id'] for r in store_module.list_runs(limit=100)}
+    # Pruning happens after the INSERT and inside its transaction, so the new
+    # row is already among the newest N: the table settles at exactly the cap.
+    assert kept == set(ids[-3:]), kept
+    for run_id in ids[:3]:
+        assert store_module.get_run(run_id) is None
+        assert not os.path.exists(os.path.join(store_module.WEB_RESULTS_DIR, f'{run_id}.json'))
+    for run_id in ids[-3:]:
+        assert os.path.exists(os.path.join(store_module.WEB_RESULTS_DIR, f'{run_id}.json'))
 
 
-def test_report_name_must_end_in_json(client):
-    resp = client.get('/api/factors/reports/not-a-json-file')
-    assert resp.status_code == 400
+def test_run_history_prune_spares_a_run_still_in_flight(monkeypatch):
+    """A long study outlived by a few hundred quick backtests must keep its
+    row: `finish_run` updates by id, so a pruned row would turn that write
+    into a silent no-op and lose the study's result."""
+    monkeypatch.setattr(store_module, 'RUN_RETENTION', 2)
+
+    long_run = store_module.create_run(kind='optimize', strategy='Study', symbols=['SA'])
+    for i in range(5):
+        quick = store_module.create_run(kind='backtest', strategy=f'S{i}', symbols=['SA'])
+        store_module.finish_run(quick, status='done', metrics={'sharpe_ratio': i})
+
+    assert store_module.get_run(long_run) is not None, 'a running study was pruned'
+    store_module.finish_run(long_run, status='done', metrics={'sharpe_ratio': 9.0})
+    assert store_module.get_run(long_run)['metrics']['sharpe_ratio'] == 9.0

@@ -10,13 +10,12 @@ rewrite (see docs/rewrite-plan.md §6).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
 
 OHLCV_COLS = ['open', 'high', 'low', 'close', 'settle', 'oi', 'volume']
-_OHLCV_COLS = OHLCV_COLS  # kept for any code still importing the private name
 
 
 @dataclass
@@ -139,7 +138,7 @@ def _build_panel(symbol: str, bundle: dict, calendar: pd.DatetimeIndex) -> Produ
             continue
         order = np.argsort(idx)
         live_bars = idx[order].astype('int64')
-        ohlcv = frame[_OHLCV_COLS].to_numpy(dtype='float64')[keep][order]
+        ohlcv = frame[OHLCV_COLS].to_numpy(dtype='float64')[keep][order]
         contracts[code] = ContractSeries(
             code=code, start=int(live_bars[0]), live_bars=live_bars, ohlcv=ohlcv,
         )
@@ -157,28 +156,3 @@ def _build_panel(symbol: str, bundle: dict, calendar: pd.DatetimeIndex) -> Produ
         contract_by_bar=contract_by_bar,
         first_bar=first_bar,
     )
-
-
-def tradable_mask(market: MarketData, symbols: Sequence[str]) -> np.ndarray:
-    """``bool[n_bars, len(symbols)]``: where each product could actually have
-    traded, in ``symbols`` order.
-
-    Equivalent to calling :meth:`ProductPanel.can_trade` for every bar of
-    every symbol, vectorized. This is the mask the factor evaluation stack
-    (``research.factor_eval``) gates every return on -- ``data_manager``
-    forward-fills prices onto bars where a product had no print and flattens
-    O/H/L onto the filled close, marking them only with ``session == 0``. Such
-    a bar looks like a perfectly good quote that returned exactly 0%, so
-    ``notna`` alone is not a valid mask; both endpoints of every return need
-    to be tradable, not just non-NaN.
-    """
-    n_bars = market.n_bars
-    out = np.zeros((n_bars, len(symbols)), dtype=bool)
-    idx = np.arange(n_bars)
-    for j, sym in enumerate(symbols):
-        panel = market.products[sym]
-        listed = idx >= panel.first_bar
-        has_session = panel.weighted['session'].astype(bool)
-        has_contract = panel.contract_by_bar != ''
-        out[:, j] = listed & has_session & has_contract
-    return out

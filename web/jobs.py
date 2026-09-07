@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import contextvars
 import dataclasses
 import itertools
 import logging
@@ -31,7 +30,7 @@ from web.config import JOB_LOG_BUFFER, JOB_MAX_WORKERS, JOB_RETENTION
 logger = logging.getLogger('futurestoolkit.web')
 
 _MONITORED_LOGGERS = (
-    'futurestoolkit', 'datafeed', 'research', 'core', 'meta', 'live',
+    'futurestoolkit', 'datafeed', 'research', 'core',
 )
 
 

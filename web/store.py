@@ -1,5 +1,5 @@
-"""Run-history index: a small SQLite table, one row per backtest/optimize/
-signal run. Equity curves and trade logs are deliberately NOT stored here --
+"""Run-history index: a small SQLite table, one row per backtest or optimize
+run. Equity curves and trade logs are deliberately NOT stored here --
 they go to ``results/web/{run_id}.json`` (see ``web.config.WEB_RESULTS_DIR``)
 so the index stays a few KB per row and the history/compare list is a plain
 table scan, not a JSON blob scan.
@@ -24,9 +24,9 @@ import sqlite3
 import threading
 import time
 import uuid
-from typing import Any, Iterable, List, Optional
+from typing import Iterable, List, Optional
 
-from web.config import DB_PATH, WEB_RESULTS_DIR
+from web.config import DB_PATH, RUN_RETENTION, WEB_RESULTS_DIR
 from web.serialize import jsonable
 
 _SCHEMA = """
@@ -94,6 +94,40 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     return d
 
 
+def _prune_locked(conn: sqlite3.Connection) -> None:
+    """Drop the oldest runs past ``RUN_RETENTION``, artifact files and all.
+
+    Caller must already hold ``_lock``. The newest ``RUN_RETENTION`` rows are
+    kept whatever their status, and anything older is kept anyway while it is
+    still ``running`` -- a study can outlive a few hundred quick backtests
+    queued behind it, and deleting the row it is about to ``finish_run`` would
+    make that update a silent no-op.
+
+    Artifact files go first: a row deleted with its JSON left behind is an
+    orphan nothing can ever find again, whereas a file deleted with its row
+    left behind is what ``get_artifact`` already handles (it returns ``None``
+    for a missing path).
+    """
+    stale = conn.execute(
+        "SELECT id, artifact_path FROM runs "
+        "WHERE status != 'running' AND id NOT IN ("
+        '    SELECT id FROM runs ORDER BY created_at DESC, rowid DESC LIMIT ?'
+        ')',
+        (RUN_RETENTION,),
+    ).fetchall()
+    if not stale:
+        return
+    for row in stale:
+        path = row['artifact_path']
+        if path and os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError:
+                # Not worth failing the run that triggered the prune over.
+                pass
+    conn.executemany('DELETE FROM runs WHERE id=?', [(row['id'],) for row in stale])
+
+
 def create_run(
     *, kind: str, strategy: str = None, symbols: Iterable[str] = (),
     start: str = None, end: str = None, cash: float = None, slippage: float = None,
@@ -110,6 +144,8 @@ def create_run(
                 start, end, cash, slippage, json.dumps(params or {}), 'running',
             ),
         )
+        # On insert, so the history is bounded at the one point it can grow.
+        _prune_locked(conn)
         conn.commit()
     return run_id
 

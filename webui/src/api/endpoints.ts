@@ -4,10 +4,6 @@ import type {
   CompareResult,
   Coverage,
   ExchangeMeta,
-  FactorCorrResult,
-  FactorInfo,
-  FactorReport,
-  FactorReportSummary,
   JobState,
   OptimizeReport,
   OptimizeReportSummary,
@@ -17,7 +13,6 @@ import type {
   RunDetail,
   RunPrice,
   RunSummary,
-  SignalReport,
   StrategyInfo,
 } from './types'
 
@@ -65,7 +60,6 @@ export interface BacktestParams {
   cash: number
   slippage: number
   params: Record<string, unknown>
-  meta_model?: string | null
 }
 
 export const backtestApi = {
@@ -101,23 +95,6 @@ export const optimizeApi = {
     api.post<OptimizeReport>(`/optimize/reports/${name}/holdout?force=${force}`),
 }
 
-export interface SignalParams {
-  strategy?: string | null
-  model?: string | null
-  symbols?: string[] | null
-  start: string
-  end: string
-  cash?: number | null
-  slippage?: number | null
-  params: Record<string, unknown>
-}
-
-export const signalsApi = {
-  start: (body: SignalParams) => api.post<{ job_id: string }>('/signals', body),
-  history: () => api.get<Array<{ file: string; as_of: string; strategy: string; symbols: string[] }>>('/signals/history'),
-  detail: (file: string) => api.get<SignalReport>(`/signals/history/${file}`),
-}
-
 export const runsApi = {
   list: (kind?: string) => api.get<RunSummary[]>(`/runs${kind ? `?kind=${kind}` : ''}`),
   get: (id: string) => api.get<RunDetail>(`/runs/${id}`),
@@ -131,42 +108,4 @@ export const jobsApi = {
   get: (id: string) => api.get<JobState>(`/jobs/${id}`),
   cancel: (id: string) => api.post<{ cancelled: string }>(`/jobs/${id}/cancel`),
   streamUrl: (id: string) => `/api/jobs/${id}/stream`,
-}
-
-export interface FactorReportParams {
-  factor: string
-  symbols: string[]
-  start: string
-  end: string
-  horizons: number[]
-  return_source: string
-  n_groups: number
-  params: Record<string, unknown>
-}
-
-export interface FactorCorrParams {
-  symbols: string[]
-  start: string
-  end: string
-  horizon: number
-}
-
-export const factorsApi = {
-  list: () => api.get<FactorInfo[]>('/factors'),
-  get: (key: string) => api.get<FactorInfo>(`/factors/${key}`),
-  startReport: (body: FactorReportParams) => api.post<{ job_id: string }>('/factors/report', body),
-  startCorr: (body: FactorCorrParams) => api.post<{ job_id: string }>('/factors/corr', body),
-  reports: () => api.get<FactorReportSummary[]>('/factors/reports'),
-  report: (name: string) => api.get<FactorReport>(`/factors/reports/${name}`),
-}
-
-// job.result shapes for the two factor job kinds (see web/routers/factors.py)
-export interface FactorReportJobResult {
-  path: string
-  report: FactorReport
-}
-
-export interface FactorCorrJobResult {
-  path: string
-  report: FactorCorrResult
 }

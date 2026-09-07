@@ -14,7 +14,7 @@ import talib
 
 from datafeed.products import product_costs
 
-from .base import Float, Int, Strategy
+from .base import Int, Strategy
 
 logger = logging.getLogger(__name__)
 

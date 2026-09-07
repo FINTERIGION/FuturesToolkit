@@ -1,33 +1,57 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { errorMessage } from '../api/client'
-import { optimizeApi, productsApi, strategiesApi } from '../api/endpoints'
+import { dataApi, optimizeApi, productsApi, strategiesApi } from '../api/endpoints'
 import type { OptimizeReport } from '../api/types'
 import { foldScoresOption, optimizeProgressOption } from '../charts/builders'
 import { EChart } from '../components/EChart'
 import { JobProgress } from '../components/JobProgress'
 import { SymbolPicker } from '../components/SymbolPicker'
 import { useJob } from '../hooks/useJob'
+import { useStickyState } from '../hooks/useStickyState'
 import { useIsDarkMode } from '../theme/useIsDarkMode'
 import { OptimizeReportsList } from './optimize/OptimizeReportsList'
+import { sharedFormDefaults } from './sharedFormDefaults'
+
+interface PrefillState {
+  strategy?: string
+  symbols?: string[]
+  start?: string
+  end?: string
+}
 
 export function OptimizePage() {
   const { t } = useTranslation()
   const dark = useIsDarkMode()
   const job = useJob()
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
   const [error, setError] = useState<string | null>(null)
+
+  // "Tune This Strategy" from BacktestPage arrives as router state.
+  const location = useLocation()
+  const [prefill] = useState<PrefillState | undefined>(() => location.state as PrefillState | undefined)
 
   const { data: strategies } = useQuery({ queryKey: ['strategies'], queryFn: strategiesApi.list })
   const { data: products } = useQuery({ queryKey: ['products'], queryFn: productsApi.list })
+  const { data: coverage } = useQuery({ queryKey: ['coverage'], queryFn: dataApi.coverage })
 
-  const [strategyKey, setStrategyKey] = useState('')
-  const [symbols, setSymbols] = useState<string[]>([])
-  const [start, setStart] = useState('2018-01-01')
-  const [end, setEnd] = useState('2026-12-31')
-  const [cash, setCash] = useState(100000)
-  const [slippage, setSlippage] = useState(0)
+  // Shared with BacktestPage under the same keys -- see `useStickyState`.
+  // Both pages take their starting values from `sharedFormDefaults`, so a key
+  // they share cannot start from two different dates.
+  const [strategyKey, setStrategyKey] = useStickyState('strategy', sharedFormDefaults.strategy)
+  const [symbols, setSymbols] = useStickyState<string[]>('symbols', sharedFormDefaults.symbols)
+  const [start, setStart] = useStickyState('start', sharedFormDefaults.start)
+  const [end, setEnd] = useStickyState('end', sharedFormDefaults.end)
+  const [cash, setCash] = useStickyState('cash', sharedFormDefaults.cash)
+  const [slippage, setSlippage] = useStickyState('slippage', sharedFormDefaults.slippage)
+
+  // `undefined` while the query is in flight -- only a loaded, all-empty
+  // coverage table means there is genuinely nothing to tune against.
+  const hasAnyData = coverage === undefined || coverage.some((c) => c.has_data)
+
   const [nTrials, setNTrials] = useState(200)
   const [nFolds, setNFolds] = useState(4)
   const [embargo, setEmbargo] = useState(10)
@@ -35,23 +59,42 @@ export function OptimizePage() {
   const [lambdaStd, setLambdaStd] = useState(0.5)
   const [minTradesPerYear, setMinTradesPerYear] = useState(4)
   const [ddCap, setDdCap] = useState(0.35)
+  // Mirrors research/objective.py's DEFAULT_SPARSE_PENALTY. Sending it
+  // explicitly rather than leaving it null keeps what the form shows and what
+  // the study runs the same number; the backend still falls back to its own
+  // default for any caller that omits the field.
+  const [sparsePenalty, setSparsePenalty] = useState(0.5)
   const [seed, setSeed] = useState(42)
   const [probeSamples, setProbeSamples] = useState(20)
   const [studyName, setStudyName] = useState('')
 
+  // A "Tune This Strategy" prefill beats whatever the sticky fields
+  // remembered. Applied once, on mount.
+  const prefillApplied = useRef(false)
+  useEffect(() => {
+    if (!prefill || prefillApplied.current) return
+    prefillApplied.current = true
+    if (prefill.strategy) setStrategyKey(prefill.strategy)
+    if (prefill.symbols?.length) setSymbols(prefill.symbols)
+    if (prefill.start) setStart(prefill.start)
+    if (prefill.end) setEnd(prefill.end)
+  }, [prefill, setStrategyKey, setSymbols, setStart, setEnd])
+
   useEffect(() => {
     if (strategies && strategies.length > 0 && !strategyKey) setStrategyKey(strategies[0].key)
-  }, [strategies, strategyKey])
+  }, [strategies, strategyKey, setStrategyKey])
 
-  // Apply the "pick a few products to start with" default exactly once, so
-  // it doesn't fight the user clearing the picker to none afterwards.
-  const symbolsInitialized = useRef(false)
+  // Seed the picker with products that actually have data downloaded, exactly
+  // once -- see the same effect on BacktestPage.
+  const symbolsInitialized = useRef(Boolean(prefill?.symbols?.length || symbols.length))
   useEffect(() => {
-    if (products && products.length > 0 && !symbolsInitialized.current) {
-      symbolsInitialized.current = true
-      setSymbols(products.slice(0, 3).map((p) => p.code))
-    }
-  }, [products])
+    if (symbolsInitialized.current) return
+    if (!products || products.length === 0 || coverage === undefined) return
+    symbolsInitialized.current = true
+    const withData = new Set(coverage.filter((c) => c.has_data).map((c) => c.symbol))
+    const preferred = products.filter((p) => withData.has(p.code))
+    setSymbols((preferred.length > 0 ? preferred : products).slice(0, 3).map((p) => p.code))
+  }, [products, coverage, setSymbols])
 
   useEffect(() => {
     if (job.state?.status === 'done') {
@@ -77,6 +120,7 @@ export function OptimizePage() {
         lambda_std: lambdaStd,
         min_trades_per_year: minTradesPerYear,
         dd_cap: ddCap,
+        sparse_penalty: sparsePenalty,
         param_overrides: {},
         seed,
         probe_samples: probeSamples,
@@ -98,6 +142,18 @@ export function OptimizePage() {
         <h1>{t('optimize.title')}</h1>
         <p>{t('optimize.subtitle')}</p>
       </div>
+
+      {!hasAnyData && (
+        <div className="card" style={{ marginBottom: 16 }}>
+          <div className="card-body">
+            <h3 style={{ margin: '0 0 4px' }}>{t('backtest.noData')}</h3>
+            <p style={{ margin: '0 0 12px', color: 'var(--text-muted)' }}>{t('backtest.noDataHint')}</p>
+            <button className="btn btn-primary" onClick={() => navigate('/data')}>
+              {t('backtest.goToData')}
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className="grid-2" style={{ alignItems: 'start' }}>
         <div className="card">
@@ -164,6 +220,10 @@ export function OptimizePage() {
                 <input type="number" step="0.05" value={ddCap} onChange={(e) => setDdCap(Number(e.target.value))} />
               </div>
               <div className="field">
+                <label>{t('optimize.sparsePenalty')}</label>
+                <input type="number" step="0.1" min="0" max="1" value={sparsePenalty} onChange={(e) => setSparsePenalty(Number(e.target.value))} />
+              </div>
+              <div className="field">
                 <label>{t('optimize.seed')}</label>
                 <input type="number" value={seed} onChange={(e) => setSeed(Number(e.target.value))} />
               </div>
@@ -208,7 +268,29 @@ export function OptimizePage() {
           {report && (
             <div className="card" style={{ marginBottom: 16 }}>
               <div className="card-body">
-                <h3 style={{ marginBottom: 10 }}>{t('optimize.bestParams')}</h3>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 10 }}>
+                  <h3 style={{ margin: 0 }}>{t('optimize.bestParams')}</h3>
+                  <div style={{ flex: 1 }} />
+                  {/* The job result carries the whole report, so this needs no
+                      extra fetch -- unlike the same action in the history list
+                      below, which only has a summary row to work from. */}
+                  <button
+                    className="btn btn-sm btn-primary"
+                    onClick={() =>
+                      navigate('/backtest', {
+                        state: {
+                          strategy: report.strategy_key,
+                          symbols: report.symbols,
+                          start: report.start,
+                          end: report.end,
+                          params: report.best_params,
+                        },
+                      })
+                    }
+                  >
+                    {t('backtest.sendToBacktest')}
+                  </button>
+                </div>
                 <pre style={{ fontSize: 12, background: 'var(--surface-2)', padding: 10, borderRadius: 6, overflowX: 'auto' }}>
                   {JSON.stringify(report.best_params, null, 2)}
                 </pre>

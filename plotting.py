@@ -11,7 +11,6 @@ import datetime
 import logging
 import os
 
-import numpy as np
 import pandas as pd
 import matplotlib
 matplotlib.use('Agg')   # Use a non-interactive backend (works without a display)

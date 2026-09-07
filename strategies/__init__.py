@@ -21,7 +21,7 @@ __all__ = [
     'Strategy', 'SetupContext', 'BarContext',
     'DoubleMaStrategy', 'RsiMeanReversionStrategy', 'MyStrategy',
     'CrossSectionalMomentumStrategy',
-    'discover_strategies', 'load_strategy', 'name_for',
+    'discover_strategies', 'load_strategy', 'load_registered_strategy', 'name_for',
 ]
 
 _CAMEL_RE = re.compile(r'(?<!^)(?=[A-Z])')
@@ -63,12 +63,40 @@ def discover_strategies() -> dict:
     return found
 
 
+def load_registered_strategy(name: str) -> type:
+    """Resolve ``name`` against :func:`discover_strategies` and nothing else.
+
+    Deliberately does *not* accept :func:`load_strategy`'s
+    ``'module.path:ClassName'`` form. That form calls
+    ``importlib.import_module`` on whatever it names, which runs that
+    module's top-level code before anything checks the result is even a
+    ``Strategy`` -- fine for a CLI argv, which is already running as the
+    user, but not for a string that arrived over HTTP. The web panel has no
+    authentication and is bindable to a non-loopback address (``ft.py web
+    --host``), so anything reachable from a request body has to stay inside
+    the registry. Private strategies lose nothing by it: they live under
+    ``strategies/`` and are discovered automatically.
+
+    Raises ``KeyError`` for an unknown name -- the only failure mode, which
+    is what lets the routers map it to one clean 4xx instead of letting an
+    import error surface as a 500.
+    """
+    registry = discover_strategies()
+    try:
+        return registry[name]
+    except KeyError:
+        raise KeyError(
+            f"Unknown strategy {name!r}. Available: {', '.join(sorted(registry))}"
+        ) from None
+
+
 def load_strategy(spec: str) -> type:
     """Resolve ``spec`` to a ``Strategy`` subclass.
 
     ``spec`` is either a short name from :func:`discover_strategies` (e.g.
     ``'double_ma'``) or a ``'module.path:ClassName'`` reference to a strategy
-    living outside this package.
+    living outside this package. Callers handling untrusted input want
+    :func:`load_registered_strategy` instead -- see there for why.
     """
     if ':' in spec:
         module_name, class_name = spec.split(':', 1)
@@ -77,10 +105,4 @@ def load_strategy(spec: str) -> type:
         if not (inspect.isclass(cls) and issubclass(cls, Strategy)):
             raise TypeError(f"{spec!r} is not a Strategy subclass")
         return cls
-    registry = discover_strategies()
-    try:
-        return registry[spec]
-    except KeyError:
-        raise KeyError(
-            f"Unknown strategy {spec!r}. Available: {', '.join(sorted(registry))}"
-        ) from None
+    return load_registered_strategy(spec)

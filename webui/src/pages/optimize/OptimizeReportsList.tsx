@@ -24,8 +24,8 @@ export function OptimizeReportsList() {
   })
 
   const holdoutMutation = useMutation({
-    mutationFn: (name: string) => optimizeApi.holdout(name),
-    onSuccess: (_data, name) => {
+    mutationFn: ({ name, force }: { name: string; force: boolean }) => optimizeApi.holdout(name, force),
+    onSuccess: (_data, { name }) => {
       void queryClient.invalidateQueries({ queryKey: ['optimize-reports'] })
       void queryClient.invalidateQueries({ queryKey: ['optimize-report', name] })
       setViewName(name)
@@ -34,12 +34,17 @@ export function OptimizeReportsList() {
   })
 
   const runHoldout = (report: OptimizeReportSummary) => {
+    // The backend refuses a second evaluation unless it is asked for
+    // explicitly -- that is the once-only holdout guard, not a glitch. So the
+    // confirmation has to carry `force` through with it: without that the
+    // user confirmed "continue anyway" and got a 409 alert back instead of
+    // the re-run they had just agreed to.
     if (report.holdout_evaluated) {
       if (!window.confirm(t('optimize.holdoutConfirm'))) return
-      holdoutMutation.mutate(report.name)
+      holdoutMutation.mutate({ name: report.name, force: true })
       return
     }
-    holdoutMutation.mutate(report.name)
+    holdoutMutation.mutate({ name: report.name, force: false })
   }
 
   const sendToBacktest = async (name: string) => {

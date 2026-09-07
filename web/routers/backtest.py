@@ -1,8 +1,8 @@
 """Run a single backtest and persist it into run history.
 
 Thin wrapper over ``core.backtest.run_single_backtest`` -- no plotting, no
-file writes beyond the run-history artifact -- the same function
-``runner.py`` and ``live.signal`` already use.
+file writes beyond the run-history artifact -- the same function the
+``ft.py backtest`` CLI already uses.
 """
 
 from __future__ import annotations
@@ -13,14 +13,13 @@ from fastapi import APIRouter, HTTPException
 
 from core.backtest import run_single_backtest
 from datafeed.products import require_products
-from strategies import load_strategy
+from strategies import load_registered_strategy
 
 from web import store
-from web.config import resolve_model_path
 from web.jobs import manager as job_manager
 from web.marketcache import cache as market_cache
 from web.schemas import BacktestRequest
-from web.serialize import annotate_inf_metrics, jsonable
+from web.serialize import annotate_inf_metrics
 
 router = APIRouter(prefix='/api', tags=['backtest'])
 logger = logging.getLogger('futurestoolkit.web')
@@ -58,23 +57,9 @@ def _build_artifact(market, symbols, result: dict) -> dict:
 def start_backtest(body: BacktestRequest):
     try:
         symbols = require_products(body.symbols)
-        strategy_cls = load_strategy(body.strategy)
+        strategy_cls = load_registered_strategy(body.strategy)
     except KeyError as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
-
-    strategy_cls_to_run = strategy_cls
-    if body.meta_model:
-        from meta.filter import make_meta_filtered
-        from meta.model import load_model
-        try:
-            model_path = resolve_model_path(body.meta_model)
-        except ValueError as e:
-            raise HTTPException(status_code=422, detail=str(e)) from e
-        try:
-            model = load_model(model_path)
-        except (FileNotFoundError, OSError) as e:
-            raise HTTPException(status_code=404, detail=str(e)) from e
-        strategy_cls_to_run = make_meta_filtered(strategy_cls, model)
 
     run_id = store.create_run(
         kind='backtest', strategy=strategy_cls.__name__, symbols=symbols,
@@ -88,7 +73,7 @@ def start_backtest(body: BacktestRequest):
         job.progress = 0.3
         job.message = f'Running {strategy_cls.__name__}'
         outcome = run_single_backtest(
-            market, strategy_cls_to_run, body.params, body.cash, body.slippage,
+            market, strategy_cls, body.params, body.cash, body.slippage,
         )
         job.progress = 0.9
         result, metrics = outcome['result'], outcome['metrics']

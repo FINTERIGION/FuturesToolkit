@@ -394,7 +394,7 @@ def test_sparse_penalty_dials_how_much_thin_evidence_counts():
 
 
 # ---------------------------------------------------------------------
-# runner.py param plumbing (the optimize -> full-backtest handoff)
+# CLI param plumbing (the optimize -> full-backtest handoff)
 # ---------------------------------------------------------------------
 
 def test_resolve_params_precedence(tmp_path):
@@ -402,7 +402,7 @@ def test_resolve_params_precedence(tmp_path):
     import argparse
     import json as _json
 
-    from runner import parse_param_value, resolve_params
+    from research.space import parse_param_value, resolve_params
     from strategies.double_ma import DoubleMaStrategy
 
     report = tmp_path / 'best.json'
@@ -520,19 +520,20 @@ def test_a_blown_up_trials_returns_are_not_shifted_forward_in_time(tmp_path, mon
 
 
 def test_packaged_modules_do_not_import_top_level_scripts():
-    """``pyproject.toml`` ships ``core``/``live``/``research``/... as packages
-    and leaves ``runner.py`` and ``plotting.py`` at the repo root, uninstalled.
-    ``live.signal`` and ``research.runner_api`` used to import
-    ``run_single_backtest`` from ``runner``, so ``pip install .`` produced a
-    tree that raised ``ModuleNotFoundError`` the first time either was used.
+    """``pyproject.toml`` ships ``core``/``datafeed``/``research``/... as
+    packages and leaves ``ft.py`` and ``plotting.py`` at the repo root,
+    uninstalled. ``research.runner_api`` used to import
+    ``run_single_backtest`` from the root ``runner`` script, so
+    ``pip install .`` produced a tree that raised ``ModuleNotFoundError``
+    the first time it was used.
     """
     import ast
     import pathlib
 
     root = pathlib.Path(__file__).resolve().parent.parent
-    packaged = ('core', 'datafeed', 'strategies', 'research', 'meta', 'live', 'factors')
+    packaged = ('core', 'datafeed', 'strategies', 'research', 'web')
     top_level = {p.stem for p in root.glob('*.py')}
-    assert {'runner', 'plotting'} <= top_level      # guard the premise
+    assert {'ft', 'plotting'} <= top_level      # guard the premise
 
     offenders = []
     for package in packaged:

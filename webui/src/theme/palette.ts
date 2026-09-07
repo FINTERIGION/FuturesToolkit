@@ -41,16 +41,6 @@ export const CANDLE = {
   down: '#1baf7a', // green: price fell (reusing the aqua/green categorical slot)
 }
 
-// Diverging pair for polarity (correlation, signed IC): blue <-> red warm/cool
-// poles (the same hues as categorical slots 1 and 8) around a neutral gray
-// midpoint -- "nothing" reads as gray, not as a third hue. Consumed as a
-// 3-stop continuous gradient (ECharts visualMap interpolates between them),
-// which is the continuous-scale equivalent of "equal steps per arm."
-export const DIVERGING = {
-  light: ['#2a78d6', '#f0efec', '#e34948'],
-  dark: ['#3987e5', '#383835', '#e66767'],
-}
-
 export const CHART_SURFACE = { light: '#fcfcfb', dark: '#1a1a19' }
 export const INK = {
   light: { primary: '#0b0b0b', secondary: '#52514e', muted: '#898781', grid: '#e1e0d9', axis: '#c3c2b7' },

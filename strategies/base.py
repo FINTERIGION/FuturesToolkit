@@ -78,10 +78,9 @@ class SetupContext:
     @property
     def market(self):
         """The full ``MarketData`` this run is trading -- the whole panel,
-        not a per-symbol slice. Needed to build a
-        ``factors.base.FactorContext`` over the same universe (see
-        ``strategies.factor_bridge``); most strategies want the per-symbol
-        accessors below instead."""
+        not a per-symbol slice. Needed to score the whole universe at once,
+        the way ``CrossSectionalMomentumStrategy`` ranks it; most strategies
+        want the per-symbol accessors below instead."""
         return self._engine.market
 
     def _weighted(self, sym: str, field: str) -> np.ndarray:
@@ -108,7 +107,7 @@ class SetupContext:
     def oi(self, sym: str) -> np.ndarray:
         return guard(self._weighted(sym, 'oi'), name=f'{sym}.oi')
 
-    def add_indicator(self, name: str, sym: str, array) -> None:
+    def add_indicator(self, name: str, sym: str, array, *, allow_gaps: bool = False) -> None:
         """Register a precomputed full-series indicator.
 
         Warmup is per product: this pushes out the bar from which ``sym``
@@ -116,8 +115,21 @@ class SetupContext:
         history starts late therefore sits out until its own indicators are
         valid, while the rest of the universe trades from their own first
         valid bar.
+
+        ``allow_gaps`` skips ``guard``'s embedded-NaN check. That check exists
+        because TA-Lib silently returns an all-NaN array when a NaN sits
+        *inside* the input -- a failure mode specific to TA-Lib's C core, not
+        a property indicators in general must have. A cross-sectional score is
+        exactly the counterexample: it legitimately has a hole on any bar a
+        product could not be scored, and a ranking strategy drops non-finite
+        scores per bar (see ``CrossSectionalMomentumStrategy.on_bar``) rather
+        than assuming a dense series. Series derived from open interest
+        or volume, which go flat or absent around a roll, are the same shape.
         """
-        arr = guard(np.asarray(array, dtype='float64'), name=f'indicator {name}/{sym}')
+        if allow_gaps:
+            arr = np.asarray(array, dtype='float64')
+        else:
+            arr = guard(np.asarray(array, dtype='float64'), name=f'indicator {name}/{sym}')
         self._engine.indicators[(name, sym)] = arr
         self._engine.require_warmup(sym, _first_valid_index(arr))
 
@@ -162,9 +174,8 @@ class BarContext:
         Empty at the top of every ``on_bar``; the engine folds it into
         ``pending`` afterwards. Reading it is what lets one strategy wrap
         another and veto or shrink its orders without the two having to know
-        about each other -- see ``meta.filter.make_meta_filtered``. Pair it
-        with ``set_target``, which is idempotent per bar, to rewrite a
-        decision the wrapped strategy just made.
+        about each other. Pair it with ``set_target``, which is idempotent per
+        bar, to rewrite a decision the wrapped strategy just made.
         """
         return dict(self._engine.queued)
 

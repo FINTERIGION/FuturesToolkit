@@ -11,7 +11,7 @@ import inspect
 from fastapi import APIRouter, HTTPException
 
 from research.space import resolve_space, spec_to_json
-from strategies import discover_strategies, load_strategy
+from strategies import discover_strategies, load_registered_strategy
 
 from web.jobs import manager as job_manager
 from web.serialize import jsonable
@@ -47,7 +47,7 @@ def list_strategies():
 @router.get('/{key}')
 def get_strategy(key: str):
     try:
-        cls = load_strategy(key)
+        cls = load_registered_strategy(key)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
     return _describe(key, cls)

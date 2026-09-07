@@ -1,37 +1,32 @@
-# Parameter Optimization — `research_runner.py`
+# Parameter Optimization — `ft.py optimize`
 
-Optuna search over anchored walk-forward folds, plus overfitting diagnostics
-and a locked holdout window. Works on any strategy `discover_strategies()`
-finds; nothing in `research/` is specific to one.
+Optuna search over anchored walk-forward folds, plus overfitting diagnostics and a locked holdout window. Works on any strategy `discover_strategies()` finds; nothing in `research/` is specific to one.
 
 ```bash
 # 1. See what will be tuned
-python research_runner.py show-space --strategy double_ma
+python ft.py show-space --strategy double_ma
 
 # 2. Search
-python research_runner.py optimize --strategy double_ma \
-    --symbols SA CF RB AG --n-trials 100
+python ft.py optimize --strategy double_ma --symbols SA CF RB AG --n-trials 200
 # -> results/optuna/DoubleMaStrategy_<ts>_best.json
 
 # 3. Evaluate the winner on the window the search never touched
-python research_runner.py holdout --best results/optuna/DoubleMaStrategy_<ts>_best.json
+python ft.py holdout --best results/optuna/DoubleMaStrategy_<ts>_best.json
 ```
 
 The resulting `*_best.json` feeds straight back into a normal run:
 
 ```bash
-python runner.py --strategy double_ma --params-from results/optuna/<...>_best.json
+python ft.py backtest --strategy double_ma --params-from results/optuna/<...>_best.json
 ```
 
 ## `show-space`
 
 | Flag | Meaning |
 | --- | --- |
-| `--strategy` | Required. Strategy to inspect |
+| `--strategy` | Required. A discovered short name, or a `module.path:ClassName` reference |
 
-Prints the space that will actually be searched. Params come from the
-strategy's `space` declaration; anything not declared and not in
-`fixed_params` gets a heuristic range inferred from its default value.
+Prints the space that will actually be searched. Params come from the strategy's `space` declaration; anything not declared and not in `fixed_params` gets a heuristic range inferred from its default value.
 
 ## `optimize`
 
@@ -39,7 +34,7 @@ Data and window flags:
 
 | Flag | Meaning | Default |
 | --- | --- | --- |
-| `--strategy` | Required | — |
+| `--strategy` | Required. A discovered short name, or a `module.path:ClassName` reference | — |
 | `--symbols` | Products to load | `SA FG CF C` |
 | `--start` / `--end` | Full sample, folds are cut inside it | `2020-01-01` / `2026-12-31` |
 | `--cash` | Initial equity | `100000` |
@@ -53,7 +48,7 @@ Split flags:
 | `--n-folds` | Anchored walk-forward folds | `4` |
 | `--embargo` | Bars dropped between train and test | `10` |
 | `--holdout-frac` | Trailing fraction locked away from the search | `0.20` |
-| `--seed` | Sampler seed | `42` |
+| `--seed` | TPE sampler seed | `42` |
 
 Search and objective flags:
 
@@ -69,31 +64,9 @@ Search and objective flags:
 | `--study-name` | Optuna study name | auto |
 | `--results-dir` | Output directory | `results/optuna` |
 
-**Objective**: mean out-of-sample Sharpe across folds, adjusted for how few
-trades the window produced, then penalized for drawdown beyond `--dd-cap`, for
-forced liquidations, and finally by `--lambda-std ×` the standard deviation
-across folds. A parameter set that is excellent in one fold and terrible in the
-next scores worse than a merely decent one.
+**Objective**: mean out-of-sample Sharpe across folds, adjusted for how few trades the window produced, then penalized for drawdown beyond `--dd-cap`, for forced liquidations, and finally by `--lambda-std ×` the standard deviation across folds. A parameter set that is excellent in one fold and terrible in the next scores worse than a merely decent one.
 
-**Trading less can never raise a score.** Under-trading is handled
-asymmetrically, on purpose: a *positive* Sharpe is scaled down by the fraction
-of `--min-trades-per-year` the window actually delivered, because a Sharpe of 3
-off two trades is a number the window cannot support; a *negative* one is taken
-at face value, because explaining a bad sample away as "too few trades to
-judge" is how a backtest flatters itself. On top of that, `--sparse-penalty ×`
-whatever fraction is missing comes off the score regardless of sign, which puts
-a floor of `-sparse-penalty` under the do-nothing corner of the space.
-
-That floor is the point. With a single multiplicative penalty, a configuration
-that never traded scored exactly `0.0` and beat every honest loser — so a
-search over a space with no edge in it returned "do nothing" as `best_params`,
-with a clean-looking value near zero rather than a negative one. If the best
-trial still never opens a position in any validation fold, `optimize` says so
-in a warning: that is the search reporting no edge, not a tuned parameter set.
-
-Raise `--sparse-penalty` toward `1.0` to demand the evidence be there before a
-configuration counts at all; lower it to let a promising-but-thin one keep
-being explored.
+**Trading less can never raise a score.** Under-trading is handled asymmetrically, on purpose: a *positive* Sharpe is scaled down by the fraction of `--min-trades-per-year` the window actually delivered. On top of that, `--sparse-penalty ×` whatever fraction is missing comes off the score regardless of sign, which puts a floor of `-sparse-penalty` under the do-nothing corner of the space. Raise `--sparse-penalty` toward `1.0` to demand the evidence be there before a configuration counts at all; lower it to let a promising-but-thin one keep being explored.
 
 ## `holdout`
 
@@ -102,9 +75,7 @@ being explored.
 | `--best` | Required. An `optimize` `*_best.json` report |
 | `--force` | Re-evaluate a window that has already been spent |
 
-Evaluates the winning params once on the trailing window the search never saw,
-and records in the report that it has been used. The one-shot rule is the
-point: a holdout you can re-query is just another training set.
+Evaluates the winning params once on the trailing window the search never saw, and records in the report that it has been used.
 
 ## Diagnostics
 
@@ -117,15 +88,6 @@ point: a holdout you can re-query is just another training set.
 | **IS/OOS decay** | How much of the in-sample Sharpe survives out of sample |
 | **Plateau check** | Whether the neighbours of the winner also work. A lone spike in the parameter surface is a fit to noise |
 
-Read them before the equity curve. A high Sharpe with PBO near 1 and no
-plateau is a number, not an edge.
+**Read them before the equity curve.** A high Sharpe with PBO near 1 and no plateau is a number, not an edge.
 
-PBO and the Deflated Sharpe are both computed on one `[n_trials, n_bars]`
-matrix of daily returns over the pre-holdout span, and each trial's curve is
-placed at the bar it actually starts on. A trial can come up short at either
-end: short at the *head* when its indicators needed more warmup than the pad
-covers, short at the *tail* when its account blew up and the run stopped there.
-The bars a trial never traded stand in as zeros, and for a blow-up that reads
-as a calm stretch rather than a dead account — so when `n_trials_blown_up` in
-the report is a meaningful share of `n_trials_completed`, treat both
-diagnostics as optimistic. `optimize` warns when that count is non-zero.
+PBO and the Deflated Sharpe are both computed on one `[n_trials, n_bars]` matrix of daily returns over the pre-holdout span, and each trial's curve is placed at the bar it actually starts on. A trial can come up short at either end: short at the *head* when its indicators needed more warmup than the pad covers, short at the *tail* when its account blew up and the run stopped there. The bars a trial never traded stand in as zeros, and for a blow-up that reads as a calm stretch rather than a dead account — so when `n_trials_blown_up` in the report is a meaningful share of `n_trials_completed`, treat both diagnostics as optimistic. `optimize` warns when that count is non-zero.

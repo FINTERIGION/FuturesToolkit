@@ -190,32 +190,15 @@ class DataUpdate:
         return out
 
 
-def main(argv=None) -> None:
-    parser = argparse.ArgumentParser(
-        description='Download exchange history and build OI-weighted daily bars.',
-    )
-    parser.add_argument(
-        'symbols',
-        nargs='*',
-        default=None,
-        help='Futures symbols (default: all registered products: %s)'
-        % ', '.join(list_products()),
-    )
-    mode = parser.add_mutually_exclusive_group()
-    mode.add_argument(
-        '--force',
-        action='store_true',
-        help='Re-download everything. Cheap for CZCE (a file per year), but for '
-             'SHFE/DCE this re-fetches every trading day since start_year.',
-    )
-    mode.add_argument(
-        '--rebuild-only',
-        action='store_true',
-        help='Rebuild CSVs from local cache without downloading',
-    )
-    args = parser.parse_args(argv)
-    logging.basicConfig(level=logging.INFO, format='%(message)s')
-    symbols = require_products(args.symbols or list_products())
+def run_updates(symbols=None, *, force: bool = False, rebuild_only: bool = False) -> None:
+    """Refresh every symbol in ``symbols`` (default: every registered product).
+
+    The one implementation behind both entry points -- ``ft.py data`` and
+    ``python -m datafeed.data_update`` -- so the partial-failure contract
+    below is stated once. Raises ``SystemExit`` if any product failed or came
+    back stale.
+    """
+    symbols = require_products(symbols or list_products())
     failed = []
     stale = []
     for symbol in symbols:
@@ -224,7 +207,7 @@ def main(argv=None) -> None:
         job = None
         try:
             job = DataUpdate(symbol)
-            job.update(force=args.force, rebuild_only=args.rebuild_only)
+            job.update(force=force, rebuild_only=rebuild_only)
         except Exception as exc:
             failed.append((symbol, exc))
             logger.error('%s failed: %s', symbol, exc)
@@ -245,6 +228,43 @@ def main(argv=None) -> None:
         )
     if problems:
         raise SystemExit('Data update ' + '; '.join(problems))
+
+
+def add_cli_args(parser) -> None:
+    """Declare the download flags on ``parser``.
+
+    Shared with ``ft.py`` so the two entry points cannot drift apart on flag
+    names or help text.
+    """
+    parser.add_argument(
+        'symbols',
+        nargs='*',
+        default=None,
+        help='Futures symbols (default: all registered products: %s)'
+        % ', '.join(list_products()),
+    )
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        '--force',
+        action='store_true',
+        help='Re-download everything. Cheap for CZCE (a file per year), but for '
+             'SHFE/DCE this re-fetches every trading day since start_year.',
+    )
+    mode.add_argument(
+        '--rebuild-only',
+        action='store_true',
+        help='Rebuild CSVs from local cache without downloading',
+    )
+
+
+def main(argv=None) -> None:
+    parser = argparse.ArgumentParser(
+        description='Download exchange history and build OI-weighted daily bars.',
+    )
+    add_cli_args(parser)
+    args = parser.parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format='%(message)s')
+    run_updates(args.symbols, force=args.force, rebuild_only=args.rebuild_only)
 
 
 if __name__ == '__main__':
