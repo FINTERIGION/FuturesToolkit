@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class ProductIn(BaseModel):
@@ -35,9 +35,41 @@ class ProductIn(BaseModel):
 
 
 class DataUpdateRequest(BaseModel):
-    symbols: List[str]
+    """The three update modes are mutually exclusive, the same way the CLI's
+    ``--force`` / ``--rebuild-only`` group is: with both set, ``DataUpdate``
+    skips the sync entirely and ``force`` is silently dropped, so a caller
+    asking for a re-download gets a cache rebuild and no warning."""
+
+    # ``None`` (the field omitted) means every registered product; an explicit
+    # ``[]`` is a caller who picked nothing and is a 422 in the router. They
+    # used to be the same thing, so submitting the panel's product picker with
+    # nothing selected kicked off a download of the entire catalogue -- close
+    # to an hour on a cold cache, from a click that asked for no products at
+    # all.
+    symbols: Optional[List[str]] = None
     force: bool = False
     rebuild_only: bool = False
+
+    @model_validator(mode='after')
+    def _one_mode_only(self):
+        if self.force and self.rebuild_only:
+            raise ValueError(
+                'force and rebuild_only are mutually exclusive: pick '
+                'force (re-download everything), rebuild_only (rebuild from '
+                'the local cache), or neither (incremental update).'
+            )
+        return self
+
+
+# Slippage is a cost, so it only ever moves a fill against you. A negative
+# value moves it *for* you -- every entry and exit filling better than the
+# market -- which does not fail, it just quietly inflates the result: on this
+# repo's own SA/double_ma window, slippage=-50 takes Sharpe from 0.54 to 3.21
+# and the run is recorded in history looking like any other. Rejected here
+# rather than clamped, because a caller who asked for -50 asked for something
+# that cannot be honoured, and silently substituting 0 would hand them numbers
+# for a run they did not request.
+_SLIPPAGE = Field(default=0.0, ge=0, description='Per-fill slippage; a cost, so it cannot be negative.')
 
 
 class BacktestRequest(BaseModel):
@@ -46,7 +78,7 @@ class BacktestRequest(BaseModel):
     start: str
     end: str
     cash: float = 100_000.0
-    slippage: float = 0.0
+    slippage: float = _SLIPPAGE
     params: Dict[str, object] = Field(default_factory=dict)
 
 
@@ -56,7 +88,7 @@ class OptimizeRequest(BaseModel):
     start: str
     end: str
     cash: float = 100_000.0
-    slippage: float = 0.0
+    slippage: float = _SLIPPAGE
     n_trials: int = 200
     n_folds: int = 4
     embargo: int = 10

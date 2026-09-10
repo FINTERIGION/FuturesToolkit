@@ -55,10 +55,15 @@ def _build_artifact(market, symbols, result: dict) -> dict:
 
 @router.post('/backtest')
 def start_backtest(body: BacktestRequest):
+    # ``ValueError`` alongside ``KeyError``: an unknown product raises the
+    # latter, but an *empty* symbol list raises the former
+    # (``require_products``), and that is what the form sends whenever the
+    # universe multi-select is submitted with nothing picked. Catching only
+    # ``KeyError`` turned the single most likely bad submission into a 500.
     try:
         symbols = require_products(body.symbols)
         strategy_cls = load_registered_strategy(body.strategy)
-    except KeyError as e:
+    except (KeyError, ValueError) as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
 
     run_id = store.create_run(
@@ -77,6 +82,16 @@ def start_backtest(body: BacktestRequest):
         )
         job.progress = 0.9
         result, metrics = outcome['result'], outcome['metrics']
+        # `compute_metrics` returns `{}` outright for a run with no recorded
+        # bars, and that is exactly what an account which starts insolvent
+        # (cash <= 0) produces: the engine flags the blow-up on bar 0 and
+        # stops, so nothing is ever appended to `equity_records` and the
+        # `blown_up` it was handed never makes it into the dict. The run then
+        # reached the panel as a clean, empty success -- a green "done" over a
+        # grid of "n/a". Carry the engine's own flag through so the panel can
+        # say what actually happened. A no-op for a normal run, where
+        # `metrics['blown_up']` already holds this same value.
+        metrics = {**metrics, 'blown_up': bool(result['blown_up'])}
         artifact = _build_artifact(market, symbols, result)
         store.finish_run(run_id, status='done', metrics=metrics, artifact=artifact)
         job.progress = 1.0

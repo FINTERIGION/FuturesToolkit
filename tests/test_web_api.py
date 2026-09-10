@@ -33,6 +33,7 @@ from tests.conftest import build_trending_market
 from web.app import app
 from web.config import STATIC_DIR
 from web.jobs import JobManager
+from web.schemas import BacktestRequest, DataUpdateRequest, OptimizeRequest
 from web.serialize import annotate_inf_metrics, jsonable
 
 _VALID_PRODUCT = {
@@ -50,7 +51,15 @@ _VALID_PRODUCT = {
 
 @pytest.fixture
 def client():
-    return TestClient(app)
+    """``base_url`` names a host the app will actually answer to.
+
+    ``TestClient``'s own default is ``http://testserver``, and the app refuses
+    a Host header outside ``web.config.allowed_hosts`` -- so leaving it at the
+    default would have every test in this module exercise the rejection path
+    rather than the endpoint it means to. A browser reaching the panel sends
+    one of these names too, so this is the realistic header, not a workaround.
+    """
+    return TestClient(app, base_url='http://localhost')
 
 
 @pytest.fixture(autouse=True)
@@ -387,6 +396,15 @@ def test_optimize_run_is_persisted_into_run_history(client, tmp_path, monkeypatc
     assert job['status'] == 'done', job
     json.loads(json.dumps(job))  # strict-JSON safety, same as the backtest test
 
+    # The panel's "Send to Backtest" reproduces a report by re-running its
+    # params under the costs it was tuned with, so these two travel with it and
+    # `OptimizeReport` in webui/src/api/types.ts declares them non-optional.
+    # Dropping them here would leave that hand-off silently sending undefined.
+    report = job['result']['report']
+    assert report['cash'] == 100_000.0
+    assert report['slippage'] == 0.0
+    assert report['strategy_key'] == 'double_ma'
+
     run = client.get(f'/api/runs/{run_id}').json()
     assert run['kind'] == 'optimize'
     assert run['status'] == 'done'
@@ -398,6 +416,239 @@ def test_optimize_run_is_persisted_into_run_history(client, tmp_path, monkeypatc
 
     resp = client.delete(f'/api/runs/{run_id}')
     assert resp.status_code == 200
+
+
+def test_optimize_writes_a_terminal_status_when_market_loading_fails(client, monkeypatch):
+    """The run row is inserted as ``running`` before the job starts, so every
+    exit path owes it a terminal status.
+
+    ``market_cache.get`` sits *before* the study call and used to be outside
+    the router's error handling, so a failure there -- an undownloaded symbol,
+    a malformed date -- left the row at ``running`` forever:
+    ``store._prune_locked`` never deletes a running row, and the panel lists
+    only ``kind='backtest'``, so the orphan was unreachable as well as
+    immortal. The backtest router has always wrapped its whole callable; this
+    asserts optimize now does too.
+    """
+    def boom(symbols, start, end, update=False):
+        raise ValueError('no data for SA')
+
+    monkeypatch.setattr(marketcache_module.cache, 'get', boom)
+
+    body = client.post('/api/optimize', json={
+        'strategy': 'double_ma', 'symbols': ['SA'],
+        'start': '2020-01-01', 'end': '2022-01-01',
+        'cash': 100_000.0, 'slippage': 0.0, 'n_trials': 2, 'n_folds': 2,
+        'embargo': 10, 'holdout_frac': 0.2, 'lambda_std': 0.5,
+        'min_trades_per_year': 4.0, 'dd_cap': 0.35, 'param_overrides': {},
+        'seed': 1, 'probe_samples': 2,
+    }).json()
+
+    for _ in range(200):
+        job = client.get(f"/api/jobs/{body['job_id']}").json()
+        if job['status'] in ('done', 'error'):
+            break
+        time.sleep(0.1)
+    assert job['status'] == 'error'
+
+    run = client.get(f"/api/runs/{body['run_id']}").json()
+    assert run['status'] == 'error', 'the run row was left mid-flight'
+    assert 'no data for SA' in run['error']
+
+    # And being terminal, it is now something the retention prune can reclaim.
+    stale = store_module.list_runs(kind='optimize')
+    assert all(r['status'] != 'running' for r in stale)
+
+
+@pytest.mark.parametrize('path, model, extra', [
+    ('/api/backtest', BacktestRequest, {}),
+    ('/api/optimize', OptimizeRequest, {
+        'n_trials': 2, 'n_folds': 2, 'embargo': 10, 'holdout_frac': 0.2,
+        'lambda_std': 0.5, 'min_trades_per_year': 4.0, 'dd_cap': 0.35,
+        'param_overrides': {}, 'seed': 1, 'probe_samples': 2,
+    }),
+])
+def test_negative_slippage_is_refused(client, path, model, extra):
+    """Slippage is a cost, so it can only move a fill against you. A negative
+    one moves it *for* you and does not fail -- it just inflates the result and
+    records it in history looking like any other run, which is worse than an
+    error.
+
+    The rejection goes through HTTP because a 422 is what the form has to
+    render; the accepted values are checked on the model instead, so this test
+    does not leave a real run on the shared job manager for whatever runs next.
+    """
+    base = {
+        'strategy': 'double_ma', 'symbols': ['SA'],
+        'start': '2024-01-01', 'end': '2024-06-01', 'cash': 200_000.0,
+    }
+    resp = client.post(path, json={**base, **extra, 'slippage': -1.0})
+    assert resp.status_code == 422, resp.text
+    assert 'greater than or equal to 0' in json.dumps(resp.json())
+
+    # Zero is the documented default and stays valid, as does any real cost.
+    assert model(**base, **extra, slippage=0.0).slippage == 0.0
+    assert model(**base, **extra, slippage=1.5).slippage == 1.5
+    assert model(**base, **extra).slippage == 0.0
+
+
+@pytest.mark.parametrize('path', ['/api/backtest', '/api/optimize'])
+def test_an_empty_symbol_list_is_a_422_not_a_500(client, path):
+    """``require_products`` reports an unknown product as ``KeyError`` but an
+    empty list as ``ValueError``, and both handlers used to catch only the
+    first.
+
+    An empty universe is exactly what the form posts when the symbol
+    multi-select is submitted with nothing picked, so the likeliest bad
+    submission on the page was the one that came back as an unhandled 500 --
+    which the panel can only render as "Internal Server Error", with none of
+    the field-level detail a 422 carries.
+
+    Neither router reaches ``store.create_run`` before validating, so a
+    rejected submission must also leave no run behind: a row stuck at
+    ``running`` is never pruned (see the run-history tests below) and would
+    outlive the mistake that made it.
+    """
+    before = len(store_module.list_runs(limit=1000))
+    body = {'strategy': 'double_ma', 'start': '2024-01-01', 'end': '2024-06-01'}
+
+    resp = client.post(path, json={**body, 'symbols': []})
+    assert resp.status_code == 422, resp.text
+    assert 'No products specified' in json.dumps(resp.json())
+
+    # The KeyError path it shares the handler with is untouched.
+    resp = client.post(path, json={**body, 'symbols': ['ZZZ']})
+    assert resp.status_code == 422, resp.text
+    assert 'ZZZ' in json.dumps(resp.json())
+
+    assert len(store_module.list_runs(limit=1000)) == before
+
+
+def test_a_run_that_starts_insolvent_is_reported_as_blown_up(client):
+    """``cash <= 0`` is an account that is insolvent on its first bar: the
+    engine flags the blow-up and stops, nothing is ever appended to
+    ``equity_records``, and ``compute_metrics`` returns ``{}`` for an empty
+    run -- dropping the ``blown_up`` it was handed. The job itself raises
+    nothing, so this reached the panel as a green "done" over a grid of "n/a".
+    The router carries the engine's own flag across that gap; the panel keys
+    its red badge off it, so it has to survive both the job result and the
+    stored run row.
+    """
+    body = client.post('/api/backtest', json={
+        'strategy': 'double_ma', 'symbols': ['SA'],
+        'start': '2024-01-01', 'end': '2024-06-01', 'cash': 0.0, 'slippage': 0.0,
+    }).json()
+
+    for _ in range(200):
+        job = client.get(f"/api/jobs/{body['job_id']}").json()
+        if job['status'] in ('done', 'error'):
+            break
+        time.sleep(0.1)
+    assert job['status'] == 'done'
+    assert job['result']['metrics']['blown_up'] is True
+
+    run = client.get(f"/api/runs/{body['run_id']}").json()
+    assert run['metrics']['blown_up'] is True
+
+    # The history list is where the badge is drawn from, so the flag has to
+    # survive the summary projection too, not just the detail endpoint.
+    row = next(r for r in client.get('/api/runs?kind=backtest').json() if r['id'] == body['run_id'])
+    assert row['status'] == 'done' and row['metrics']['blown_up'] is True
+
+    # A solvent run over the same window must not be flagged.
+    ok = client.post('/api/backtest', json={
+        'strategy': 'double_ma', 'symbols': ['SA'],
+        'start': '2024-01-01', 'end': '2024-06-01', 'cash': 200_000.0, 'slippage': 0.0,
+    }).json()
+    for _ in range(200):
+        job = client.get(f"/api/jobs/{ok['job_id']}").json()
+        if job['status'] in ('done', 'error'):
+            break
+        time.sleep(0.1)
+    assert job['status'] == 'done'
+    assert job['result']['metrics']['blown_up'] is False
+
+
+def test_report_delete_removes_only_the_report_json(client, tmp_path, monkeypatch):
+    """The router binds ``RESULTS_DIR`` under its own name at import time, so
+    the directory has to be patched on the router module -- patching
+    ``research.optimize.RESULTS_DIR`` (what the run_study test above does)
+    would leave list/get/delete still pointed at the repo's real
+    ``results/optuna/``.
+    """
+    import web.routers.optimize as optimize_router
+
+    monkeypatch.setattr(optimize_router, 'OPTUNA_RESULTS_DIR', str(tmp_path))
+
+    for name, evaluated in (('DoubleMa_20250101_best.json', False), ('DoubleMa_20250102_best.json', True)):
+        (tmp_path / name).write_text(json.dumps({
+            'strategy': 'DoubleMaStrategy', 'symbols': ['SA'], 'timestamp': name.split('_')[1],
+            'best_value': 1.5, 'holdout_evaluated': evaluated,
+        }), encoding='utf-8')
+    # One db backs every run of a study name, so several reports can point at
+    # it -- deleting one of them must not touch it.
+    db = tmp_path / 'DoubleMaStrategy_SA.db'
+    db.write_bytes(b'not really sqlite, but its survival is the point')
+
+    listing = client.get('/api/optimize/reports').json()
+    assert {r['name'] for r in listing} == {'DoubleMa_20250101_best.json', 'DoubleMa_20250102_best.json'}
+
+    resp = client.delete('/api/optimize/reports/DoubleMa_20250101_best.json')
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {'deleted': 'DoubleMa_20250101_best.json'}
+
+    assert not (tmp_path / 'DoubleMa_20250101_best.json').exists()
+    assert (tmp_path / 'DoubleMa_20250102_best.json').exists()
+    assert db.exists()
+
+    listing = client.get('/api/optimize/reports').json()
+    assert [r['name'] for r in listing] == ['DoubleMa_20250102_best.json']
+
+    # Gone means gone, for both the second delete and any later read.
+    assert client.delete('/api/optimize/reports/DoubleMa_20250101_best.json').status_code == 404
+    assert client.get('/api/optimize/reports/DoubleMa_20250101_best.json').status_code == 404
+
+
+def test_report_delete_answers_404_when_the_file_vanishes_mid_call(client, tmp_path, monkeypatch):
+    """``_report_path`` checks existence and ``os.remove`` acts on the answer,
+    so a second tab deleting the same report in between turned a lost race into
+    a 500 traceback. It is the same "already gone" the endpoint answers 404 for
+    when it loses the race by a wider margin."""
+    import web.routers.optimize as optimize_router
+
+    monkeypatch.setattr(optimize_router, 'OPTUNA_RESULTS_DIR', str(tmp_path))
+    (tmp_path / 'DoubleMa_20250101_best.json').write_text('{}', encoding='utf-8')
+
+    real_remove = os.remove
+
+    def vanish(path):
+        real_remove(path)                      # the other tab's delete
+        real_remove(path)                      # ours, now losing the race
+
+    monkeypatch.setattr(optimize_router.os, 'remove', vanish)
+
+    resp = client.delete('/api/optimize/reports/DoubleMa_20250101_best.json')
+    assert resp.status_code == 404, resp.text
+    assert 'DoubleMa_20250101_best.json' in resp.json()['detail']
+
+
+def test_report_delete_rejects_names_that_escape_the_results_dir(client, tmp_path, monkeypatch):
+    """``_report_path`` is the only guard between a URL segment and
+    ``os.remove``. httpx collapses ``..`` client-side, so the reachable
+    attack is a name that stays one segment: an absolute-ish or
+    separator-carrying name, or a non-report extension.
+    """
+    import web.routers.optimize as optimize_router
+
+    monkeypatch.setattr(optimize_router, 'OPTUNA_RESULTS_DIR', str(tmp_path))
+
+    victim = tmp_path / 'keepme.txt'
+    victim.write_text('untouched', encoding='utf-8')
+
+    for name in ('..%2F..%2Fdatafeed%2Fproducts.json', '..%5Cproducts.json', 'keepme.txt', 'DoubleMa_best'):
+        resp = client.delete(f'/api/optimize/reports/{name}')
+        assert resp.status_code in (400, 404), (name, resp.status_code)
+    assert victim.read_text(encoding='utf-8') == 'untouched'
 
 
 # ---------------------------------------------------------------------
@@ -728,6 +979,22 @@ def test_second_update_of_the_same_symbol_is_refused(client, monkeypatch):
     assert not data_router.job_manager.any_active()
 
 
+def test_update_refuses_force_together_with_rebuild_only(client):
+    """The CLI puts these two in a mutually exclusive group; the API used to
+    accept both, and ``DataUpdate`` then skipped the sync and dropped
+    ``force`` silently -- a request to re-download that never downloaded."""
+    resp = client.post(
+        '/api/data/update',
+        json={'symbols': ['SA'], 'force': True, 'rebuild_only': True},
+    )
+    assert resp.status_code == 422
+    assert 'mutually exclusive' in str(resp.json()['detail'])
+
+    # Each mode on its own is still a valid request body.
+    for body in ({'force': True}, {'rebuild_only': True}, {}):
+        assert DataUpdateRequest(symbols=['SA'], **body).symbols == ['SA']
+
+
 def test_run_history_write_does_not_deadlock_on_a_cold_connection():
     """`create_run` calls `_get_conn` while already holding the write lock, so
     building the connection under that same non-reentrant lock hangs the very
@@ -930,3 +1197,149 @@ def test_run_history_prune_spares_a_run_still_in_flight(monkeypatch):
     assert store_module.get_run(long_run) is not None, 'a running study was pruned'
     store_module.finish_run(long_run, status='done', metrics={'sharpe_ratio': 9.0})
     assert store_module.get_run(long_run)['metrics']['sharpe_ratio'] == 9.0
+
+
+def test_run_history_limit_cannot_be_widened_past_its_cap(client):
+    """SQLite reads a negative ``LIMIT`` as *no* limit, so ``?limit=-1`` walked
+    straight past the 100 the signature advertised and returned the whole
+    table: every stored run's metrics and params, from one query string.
+    """
+    for i in range(3):
+        run_id = store_module.create_run(kind='backtest', strategy=f'S{i}', symbols=['SA'])
+        store_module.finish_run(run_id, status='done', metrics={'sharpe_ratio': i})
+
+    for rejected in (-1, 0, 1001):
+        resp = client.get(f'/api/runs?limit={rejected}')
+        assert resp.status_code == 422, (rejected, resp.text)
+
+    # The honest range still works, default included.
+    assert len(client.get('/api/runs?limit=2').json()) == 2
+    assert len(client.get('/api/runs').json()) == 3
+
+
+# ---------------------------------------------------------------------
+# Host header
+# ---------------------------------------------------------------------
+
+def test_a_foreign_host_header_is_refused():
+    """The panel has no authentication and binds to loopback, which stops
+    another *machine* but not another *page*: a site the user has open can
+    resolve a name it controls to 127.0.0.1 and drive this API from inside
+    their browser, where DELETE /api/products/{code}?purge_data=true deletes
+    real files. Same-origin policy does not prevent the request, only the
+    reading of its response, so the write lands either way.
+
+    The Host header is the part such a request cannot forge -- it carries the
+    attacker's own hostname -- so refusing anything the panel is not served
+    under is what actually closes it.
+    """
+    attacker = TestClient(app, base_url='http://rebound.example.com')
+    resp = attacker.get('/api/health')
+    assert resp.status_code == 400, resp.text
+
+    # A destructive verb is refused before it reaches any handler.
+    resp = attacker.delete('/api/products/SA?purge_data=true')
+    assert resp.status_code == 400, resp.text
+
+    for allowed in ('http://localhost', 'http://127.0.0.1'):
+        assert TestClient(app, base_url=allowed).get('/api/health').status_code == 200
+
+
+def test_allowed_hosts_reads_the_environment(monkeypatch):
+    """`ft.py web` widens the list through this variable when asked to bind
+    somewhere other than loopback, where no default could guess the name the
+    operator reaches the box by."""
+    from web.config import ALLOWED_HOSTS_ENV, DEFAULT_ALLOWED_HOSTS, allowed_hosts
+
+    monkeypatch.delenv(ALLOWED_HOSTS_ENV, raising=False)
+    assert allowed_hosts() == list(DEFAULT_ALLOWED_HOSTS)
+
+    monkeypatch.setenv(ALLOWED_HOSTS_ENV, 'panel.internal, 10.0.0.5 ,')
+    assert allowed_hosts() == ['panel.internal', '10.0.0.5']
+
+    monkeypatch.setenv(ALLOWED_HOSTS_ENV, '   ')
+    assert allowed_hosts() == list(DEFAULT_ALLOWED_HOSTS)
+
+
+def test_a_run_left_running_by_a_dead_server_is_adopted_on_reconnect(tmp_path, monkeypatch):
+    """The job registry behind a ``running`` row is an in-memory dict, so a
+    server that is killed mid-backtest leaves a row nothing can ever finish.
+
+    That row was also the one status `_prune_locked` deliberately never
+    deletes, so it was permanently ``running`` *and* permanently unprunable,
+    while still occupying a slot in the newest-N window that keeps real
+    history alive. Adopting it at connect time is safe precisely because of
+    that in-memory registry: anything still ``running`` when a process first
+    opens the index belongs to a process that is gone.
+    """
+    monkeypatch.setattr(store_module, 'DB_PATH', str(tmp_path / 'orphans.db'))
+    monkeypatch.setattr(store_module, '_conn', None)
+
+    stranded = store_module.create_run(kind='backtest', strategy='Killed', symbols=['SA'])
+    finished = store_module.create_run(kind='backtest', strategy='Fine', symbols=['SA'])
+    store_module.finish_run(finished, status='done', metrics={'sharpe_ratio': 1.0})
+    assert store_module.get_run(stranded)['status'] == 'running'
+
+    # Drop the connection the way a restart does, then reopen the same file.
+    store_module._conn = None
+    row = store_module.get_run(stranded)
+    assert row['status'] == 'interrupted'
+    assert 'never written' in row['error']
+
+    # A row that already had a terminal status is left exactly as it was.
+    assert store_module.get_run(finished)['status'] == 'done'
+    assert store_module.get_run(finished)['error'] is None
+
+    # And the adopted row is now prunable, which is the leak this closes.
+    monkeypatch.setattr(store_module, 'RUN_RETENTION', 1)
+    newest = store_module.create_run(kind='backtest', strategy='New', symbols=['SA'])
+    store_module.finish_run(newest, status='done', metrics={'sharpe_ratio': 2.0})
+    assert store_module.get_run(stranded) is None
+
+
+def test_data_update_refuses_an_empty_selection_but_omitting_it_means_all(client, monkeypatch):
+    """``[]`` and "the field is absent" used to be the same request.
+
+    The panel's picker always posts an explicit array, so submitting it with
+    nothing selected fell through to `list_products()` and started a download
+    of the entire catalogue -- close to an hour on a cold cache, off a click
+    that asked for no products at all. Omitting the field is still how a
+    caller asks for everything, because that is a request someone can only
+    make on purpose.
+    """
+    import web.routers.data as data_router
+
+    class _NoopUpdate:
+        stale_keys = ()
+
+        def __init__(self, symbol):
+            self.symbol = symbol
+
+        def update(self, force=False, rebuild_only=False):
+            return None
+
+    monkeypatch.setattr(data_router, 'DataUpdate', _NoopUpdate)
+
+    resp = client.post('/api/data/update', json={'symbols': []})
+    assert resp.status_code == 422, resp.text
+    assert 'No products specified' in json.dumps(resp.json())
+
+    resp = client.post('/api/data/update', json={'symbols': ['ZZZ']})
+    assert resp.status_code == 422, resp.text
+
+    started = client.post('/api/data/update', json={})
+    assert started.status_code == 200, started.text
+    job_id = started.json()['job_id']
+    for _ in range(500):
+        if client.get(f'/api/jobs/{job_id}').json()['status'] in ('done', 'error'):
+            break
+        time.sleep(0.01)
+    result = client.get(f'/api/jobs/{job_id}').json()
+    assert result['status'] == 'done', result
+    assert result['result']['symbols'] == products_module.list_products()
+
+    # Same rule on the model itself, so the CLI-shaped call reads the same way.
+    assert DataUpdateRequest().symbols is None
+    assert DataUpdateRequest(symbols=['SA']).symbols == ['SA']
+
+    assert not data_router.job_manager.any_active()

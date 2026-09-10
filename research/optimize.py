@@ -46,6 +46,22 @@ RESULTS_DIR = os.path.join(ROOT_DIR, 'results', 'optuna')
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 
+def _plateau_summary(plateau: dict) -> str:
+    """Spiking dimensions, plus a count of any the check could not measure.
+
+    A dimension whose neighbours were all ruled out by the strategy's own
+    constraints -- or a best score of ~0, which leaves no scale for a relative
+    drop -- is not a flat neighbourhood, it is an unanswered question. Logging
+    only the spikes reported both as an empty list.
+    """
+    dims = plateau.get('dimensions', {})
+    spikes = sorted(k for k, v in dims.items() if v.get('flags_spike'))
+    unmeasured = sorted(k for k, v in dims.items() if not v.get('evaluated', True))
+    if unmeasured:
+        return f"{spikes} ({len(unmeasured)} not measurable: {', '.join(unmeasured)})"
+    return str(spikes)
+
+
 def _probe_reserve_bars(market, strategy_cls, space, *, n_samples: int, margin: float, seed: int) -> int:
     """Sample ``n_samples`` random configurations from ``space`` and take
     the largest observed warmup, inflated by ``margin``, as the number of
@@ -316,7 +332,7 @@ def run_study(
     logger.info(
         'Diagnostics: IS/OOS ratio=%.2f  PBO=%.2f  DSR=%.2f  plateau_spikes=%s',
         diagnostics['is_oos_decay']['ratio'], diagnostics['pbo']['pbo'], diagnostics['dsr']['dsr'],
-        [k for k, v in diagnostics['plateau']['dimensions'].items() if v['flags_spike']],
+        _plateau_summary(diagnostics['plateau']),
     )
     logger.info('Report written: %s', path)
 

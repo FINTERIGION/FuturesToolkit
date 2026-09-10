@@ -25,7 +25,6 @@ npm run build         # writes to ../web/static
 | Data | Coverage table (rows, date range, staleness) and a job to download/rebuild per product |
 | Backtest | Run any discovered strategy over a date range; equity curve, drawdown, position, price & signals, trade log, per-symbol and per-exit-reason breakdowns |
 | Optimize | Optuna anchored walk-forward search with a live trial-by-trial progress chart, fold scores, overfitting diagnostics, and the once-only holdout check |
-| Runs | Every backtest/optimize run, indexed for reopening and side-by-side comparison |
 
 ## Architecture
 
@@ -48,7 +47,7 @@ webui/                    Vite + React + TypeScript frontend
   src/i18n/                  en / zh resource files
 ```
 
-The backend is a thin layer: every route calls the same functions the CLI calls (`run_single_backtest`, `run_study`, `compute_signal`, `DataManager`, `discover_strategies`).
+The backend is a thin layer: every route calls the same functions the CLI calls (`run_single_backtest`, `run_study`, `evaluate_holdout`, `DataManager`, `discover_strategies`).
 
 ### Product registry
 

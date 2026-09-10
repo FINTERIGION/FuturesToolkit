@@ -131,6 +131,38 @@ table.dtable {
   background: var(--surface-2);
 }
 
+/* Rows that toggle a selection: the whole row is the hit target, so it needs
+   to read as one -- and dragging across it must not highlight text instead. */
+.dtable tbody tr.row-selectable td {
+  user-select: none;
+}
+
+.dtable tbody tr.row-selected {
+  background: var(--accent-bg);
+}
+
+/* Stacking the same translucent accent twice deepens the tint in either
+   theme; a black or white overlay would only work in one of them. */
+.dtable tbody tr.row-selected:hover {
+  background: var(--accent-bg);
+  box-shadow: inset 0 0 0 9999px var(--accent-bg);
+}
+
+/* The row whose detail view is currently open -- the backtest results panel,
+   or the optimize report drawer. Marked with a rule on the first cell rather
+   than a fill, so it stays legible on a row that is also tinted by a
+   selection. */
+.dtable tbody tr.row-open td:first-child {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+/* A row in a clickable table that has nothing to open -- an unfinished run,
+   say. The table hands every row the same pointer, so the dead ones have to
+   take it back or they advertise a click that does nothing. */
+.dtable tbody tr.row-static {
+  cursor: default;
+}
+
 .dtable-wrap {
   overflow-x: auto;
   border-radius: var(--radius);
@@ -172,6 +204,108 @@ table.dtable {
 .field input.invalid,
 .field select.invalid {
   border-color: var(--danger);
+}
+
+.input-group {
+  display: flex;
+  align-items: stretch;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.input-group:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.field .input-group input,
+.field .input-group select {
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  min-width: 0;
+}
+
+.field .input-group input:focus,
+.field .input-group select:focus {
+  outline: none;
+}
+
+.field .input-group input {
+  flex: 1 1 auto;
+}
+
+.field .input-group select {
+  flex: 0 0 auto;
+  border-left: 1px solid var(--border-strong);
+  color: var(--text-muted);
+  padding-right: 6px;
+}
+
+.field .input-group .input-unit {
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  border-left: 1px solid var(--border-strong);
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.field-wide {
+  grid-column: 1 / -1;
+}
+
+.month-picker {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.month-chip {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.month-chip:hover {
+  background: var(--surface-2);
+}
+
+.month-chip.active {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+.month-chip input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+  margin: 0;
+}
+
+.month-chip input:focus-visible + span {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+
+@media (max-width: 560px) {
+  .month-picker {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+  }
 }
 
 .field-hint {
@@ -412,6 +546,12 @@ table.dtable {
   flex-wrap: wrap;
 }
 
+.toolbar-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
 .spacer {
   flex: 1;
 }
@@ -429,6 +569,14 @@ table.dtable {
 .hint-banner.warning {
   background: var(--warning-bg);
   border-color: var(--warning);
+}
+
+/* Stronger than .warning, for an outcome rather than a caution: a run the
+   engine stopped on an insolvent account. Same red as .badge-danger, so the
+   badge and the banner explaining it read as one thing. */
+.hint-banner.danger {
+  background: var(--danger-bg);
+  border-color: var(--danger);
 }
 
 .grid-2 {

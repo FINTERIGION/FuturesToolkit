@@ -52,6 +52,10 @@ export function OptimizePage() {
   // coverage table means there is genuinely nothing to tune against.
   const hasAnyData = coverage === undefined || coverage.some((c) => c.has_data)
 
+  // See BacktestPage: a negative slippage pays the strategy to trade, and a
+  // study run on one optimises against that. The API rejects it as well.
+  const slippageValid = slippage >= 0
+
   const [nTrials, setNTrials] = useState(200)
   const [nFolds, setNFolds] = useState(4)
   const [embargo, setEmbargo] = useState(10)
@@ -99,7 +103,6 @@ export function OptimizePage() {
   useEffect(() => {
     if (job.state?.status === 'done') {
       void queryClient.invalidateQueries({ queryKey: ['optimize-reports'] })
-      void queryClient.invalidateQueries({ queryKey: ['runs'] })
     }
   }, [job.state?.status, queryClient])
 
@@ -189,7 +192,14 @@ export function OptimizePage() {
               </div>
               <div className="field">
                 <label>{t('common.slippage')}</label>
-                <input type="number" step="any" value={slippage} onChange={(e) => setSlippage(Number(e.target.value))} />
+                <input
+                  type="number"
+                  step="any"
+                  min="0"
+                  className={slippageValid ? undefined : 'invalid'}
+                  value={slippage}
+                  onChange={(e) => setSlippage(Number(e.target.value))}
+                />
               </div>
               <div className="field">
                 <label>{t('optimize.nTrials')}</label>
@@ -238,11 +248,12 @@ export function OptimizePage() {
             </div>
 
             {error && <div className="hint-banner warning">{error}</div>}
+            {!slippageValid && <div className="hint-banner warning">{t('common.slippageNegative')}</div>}
 
             <button
               className="btn btn-primary"
               onClick={() => void runOptimize()}
-              disabled={job.isActive || !strategyKey || symbols.length === 0}
+              disabled={job.isActive || !strategyKey || symbols.length === 0 || !slippageValid}
               style={{ marginTop: 8, width: '100%', justifyContent: 'center' }}
             >
               {t('optimize.runOptimize')}
@@ -254,7 +265,13 @@ export function OptimizePage() {
           {job.state && (
             <div className="card" style={{ marginBottom: 16 }}>
               <div className="card-body">
-                <JobProgress state={job.state} logs={job.logs} onCancel={job.cancel} streaming={job.streaming} />
+                <JobProgress
+                  state={job.state}
+                  logs={job.logs}
+                  onCancel={job.cancel}
+                  streaming={job.streaming}
+                  lost={job.lost}
+                />
                 {trialData.length > 0 && (
                   <EChart
                     option={optimizeProgressOption(dark, trialData.map((d) => d.trial), trialData.map((d) => d.value))}
@@ -283,6 +300,8 @@ export function OptimizePage() {
                           symbols: report.symbols,
                           start: report.start,
                           end: report.end,
+                          cash: report.cash,
+                          slippage: report.slippage,
                           params: report.best_params,
                         },
                       })

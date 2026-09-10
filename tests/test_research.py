@@ -11,6 +11,8 @@ new strategy dropped into strategies/ is covered automatically.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pytest
 
@@ -21,6 +23,7 @@ from strategies import discover_strategies
 from strategies.base import BarContext, SetupContext, Strategy
 
 from research.objective import DEFAULT_SPARSE_PENALTY, _finite, score
+from research.overfit import pbo_cscv, plateau_check
 from research.optimize import run_study
 from research.runner_api import run_window
 from research.space import resolve_space
@@ -551,3 +554,67 @@ def test_packaged_modules_do_not_import_top_level_scripts():
                     for name in names if name in top_level
                 ]
     assert not offenders, f'packaged modules importing unpackaged scripts: {offenders}'
+
+
+# ---------------------------------------------------------------------
+# Overfitting diagnostics
+# ---------------------------------------------------------------------
+
+def test_plateau_check_measures_a_collapse_around_a_negative_optimum():
+    """A negative best score is the normal outcome for a space with no edge,
+    which is exactly when this check earns its keep.
+
+    Gating the relative drop on ``base_score > 0`` left `drops` empty for
+    every dimension in that case, so the report came back reading "flat
+    neighbourhood, nothing flagged" for a check that had not run at all.
+    Dividing by the magnitude reads the same collapse either side of zero.
+    """
+    space = {'fast': Int(5, 50, step=1), 'slow': Int(20, 200, step=5)}
+    best = {'fast': 10, 'slow': 60}
+
+    def evaluate(params):
+        return -1.5 if params == best else -4.0     # neighbours are far worse
+
+    result = plateau_check(object, space, best, evaluate)
+    assert result['base_score'] == -1.5
+    for name, dim in result['dimensions'].items():
+        assert dim['evaluated'], name
+        assert dim['flags_spike'], name
+        assert dim['max_drop_pct'] > 100.0, (name, dim)
+
+    # A neighbourhood that is genuinely flat around a negative optimum still
+    # reads as flat -- the fix must not turn every losing search into a spike.
+    result = plateau_check(object, space, best, lambda params: -1.5)
+    for name, dim in result['dimensions'].items():
+        assert dim['evaluated'], name
+        assert not dim['flags_spike'], name
+
+    # A base score of ~0 leaves no scale for a relative drop. That is "not
+    # measured", and it has to be distinguishable from "measured and flat".
+    result = plateau_check(object, space, best, lambda params: 0.0)
+    for name, dim in result['dimensions'].items():
+        assert not dim['evaluated'], name
+        assert not dim['flags_spike'], name
+
+
+@pytest.mark.parametrize('n_bars', [40, 16, 15, 10, 7, 5, 4])
+def test_pbo_splits_the_window_into_an_even_number_of_blocks(n_bars):
+    """CSCV assigns half the blocks to each side and relies on the two halves
+    being interchangeable. The parity adjustment used to run *inside* the
+    clamp to ``n_bars``, so a short window could hand back an odd count --
+    15 bars gave 15 blocks, 7 in-sample against 8 out-of-sample.
+    """
+    rng = np.random.default_rng(3)
+    result = pbo_cscv(rng.normal(0, 0.01, (6, n_bars)))
+    assert result['n_blocks'] % 2 == 0, result
+    assert result['n_blocks'] >= 2
+    assert 0.0 <= result['pbo'] <= 1.0
+
+
+def test_pbo_declines_to_answer_for_a_window_it_cannot_split():
+    """One bar cannot be halved. Reporting NaN says the diagnostic did not
+    run, where a number would claim it did."""
+    rng = np.random.default_rng(4)
+    result = pbo_cscv(rng.normal(0, 0.01, (6, 1)))
+    assert math.isnan(result['pbo'])
+    assert result['n_combinations'] == 0

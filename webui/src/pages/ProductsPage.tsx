@@ -32,14 +32,14 @@ export function ProductsPage() {
     { key: 'exchange', header: t('products.exchange'), render: (p) => p.exchange },
     { key: 'multiplier', header: t('products.multiplier'), render: (p) => p.costs.multiplier },
     { key: 'tick_size', header: t('products.tickSize'), render: (p) => p.tick_size },
-    { key: 'margin_rate', header: t('products.marginRate'), render: (p) => `${(p.costs.margin_rate * 100).toFixed(1)}%` },
+    { key: 'margin_rate', header: t('products.marginRate'), render: (p) => `${Math.round(p.costs.margin_rate * 100)}%` },
     {
       key: 'commission',
       header: t('products.commissionMode'),
       render: (p) =>
         p.costs.commission_mode === 'rate'
-          ? `${((p.costs.commission_rate ?? 0) * 10000).toFixed(2)}‱`
-          : `${(p.costs.commission_per_lot ?? 0).toFixed(2)}${t('products.perLot')}`,
+          ? `${((p.costs.commission_rate ?? 0) * 10000).toFixed(1)}‱`
+          : `${(p.costs.commission_per_lot ?? 0).toFixed(1)}${t('products.perLot')}`,
     },
     {
       key: 'main_months',

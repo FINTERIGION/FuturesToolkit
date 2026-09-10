@@ -18,7 +18,6 @@ export function TopBar() {
           <NavLink to="/data">{t('nav.data')}</NavLink>
           <NavLink to="/backtest">{t('nav.backtest')}</NavLink>
           <NavLink to="/optimize">{t('nav.optimize')}</NavLink>
-          <NavLink to="/runs">{t('nav.runs')}</NavLink>
         </nav>
         <div className="spacer" />
         <div className="lang-switch">

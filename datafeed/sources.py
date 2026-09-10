@@ -24,12 +24,14 @@ top of ``cache/``.
 
 from __future__ import annotations
 
+import contextlib
 import gzip
 import hashlib
 import json
 import logging
 import os
 import re
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -65,6 +67,43 @@ _REFETCH_TAIL_DAYS = 3
 
 class NoDataForDate(Exception):
     """The exchange has no bars for this calendar day (weekend or holiday)."""
+
+
+# --------------------------------------------------------------------------
+# Filesystem
+# --------------------------------------------------------------------------
+
+@contextlib.contextmanager
+def _atomic_path(path: str):
+    """Yield a temp path to write, then move it onto ``path`` on a clean exit.
+
+    The temp name is unique per call rather than a fixed ``f'{path}.tmp'``.
+    The day payloads under ``cache/{SHFE,DCE}/`` are shared by every product
+    on the venue (see ``_DailyFileSource``), so two products syncing the same
+    day resolve ``path`` -- and so the old fixed name -- identically. The web
+    panel runs two update jobs at once and de-duplicates only by product
+    (``web/routers/data.py``), which puts that one click apart: both writers
+    opened the same temp file, one ``os.replace`` won, and the loser either
+    wrote its tail into the winner's already-renamed inode or died on
+    ``FileNotFoundError`` partway through its own job.
+
+    The cleanup is a ``finally`` rather than an ``except`` so it also covers
+    a ``KeyboardInterrupt`` mid-write, and it is unconditional because a
+    successful ``os.replace`` has already moved the temp file away -- there is
+    nothing left for it to find.
+    """
+    directory = os.path.dirname(path) or '.'
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(
+        dir=directory, prefix=f'.{os.path.basename(path)}.', suffix='.tmp',
+    )
+    os.close(fd)
+    try:
+        yield tmp_path
+        os.replace(tmp_path, path)
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
 
 # --------------------------------------------------------------------------
@@ -113,16 +152,9 @@ _CZCE_MIN_BYTES = 64
 def _http_download(url: str, dest: str, headers: dict = None) -> None:
     """Fetch ``url`` into ``dest`` atomically."""
     payload = _http_bytes(url, headers, min_bytes=_CZCE_MIN_BYTES)
-    os.makedirs(os.path.dirname(dest) or '.', exist_ok=True)
-    tmp_path = f'{dest}.tmp'
-    try:
+    with _atomic_path(dest) as tmp_path:
         with open(tmp_path, 'wb') as fh:
             fh.write(payload)
-        os.replace(tmp_path, dest)
-    except OSError:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
-        raise
 
 
 def _post_json(url: str, payload: dict, headers: dict = None) -> dict:
@@ -475,16 +507,9 @@ class _DailyFileSource(ExchangeSource):
         return os.path.join(self.dir, f'{self.prefix}{day:%Y%m%d}.json.gz')
 
     def _write_day(self, path: str, payload: bytes) -> None:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp_path = f'{path}.tmp'
-        try:
+        with _atomic_path(path) as tmp_path:
             with gzip.open(tmp_path, 'wb') as fh:
                 fh.write(payload)
-            os.replace(tmp_path, path)
-        except OSError:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-            raise
 
     @staticmethod
     def _read_day(path: str) -> dict:
@@ -531,11 +556,9 @@ class _DailyFileSource(ExchangeSource):
             return {}
 
     def _write_calendar(self, state: dict) -> None:
-        os.makedirs(self.dir, exist_ok=True)
-        tmp_path = f'{self._calendar_path}.tmp'
-        with open(tmp_path, 'w', encoding='utf-8') as fh:
-            json.dump(state, fh, ensure_ascii=False, indent=2)
-        os.replace(tmp_path, self._calendar_path)
+        with _atomic_path(self._calendar_path) as tmp_path:
+            with open(tmp_path, 'w', encoding='utf-8') as fh:
+                json.dump(state, fh, ensure_ascii=False, indent=2)
 
     # -- ExchangeSource ----------------------------------------------------
 
@@ -691,6 +714,15 @@ class _ShfeSource(_DailyFileSource):
 # DCE -- authenticated open API
 # --------------------------------------------------------------------------
 
+# Plain HTTP, and deliberately so rather than by oversight: www.dce.com.cn does
+# not answer on 443 at all (both a TLS handshake and a plain connect to the port
+# time out), so unlike the CZCE and SHFE endpoints above -- which are https --
+# there is no encrypted endpoint to switch to. That has a real consequence
+# worth stating where the credentials are used: DCE_SECRET travels in the login
+# request body, and the apikey and bearer token travel in a header on every
+# request after it, all readable by anything on the path. Treat these as
+# read-only market-data credentials, rotate them on a schedule, and do not
+# reuse them anywhere else.
 _DCE_BASE = 'http://www.dce.com.cn/dceapi'
 _DCE_ENV_KEY = 'DCE_API_KEY'
 _DCE_ENV_SECRET = 'DCE_SECRET'

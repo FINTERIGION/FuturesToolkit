@@ -42,10 +42,15 @@ def _optimize_metrics(report: dict) -> dict:
 
 @router.post('')
 def start_optimize(body: OptimizeRequest):
+    # ``ValueError`` alongside ``KeyError`` for the same reason as the backtest
+    # router: an empty ``symbols`` list is a ``ValueError`` out of
+    # ``require_products``, not a ``KeyError``, and it reached the client as a
+    # 500 rather than the 422 the second block below already returns for a bad
+    # param override.
     try:
         strategy_cls = load_registered_strategy(body.strategy)
         symbols = require_products(body.symbols)
-    except KeyError as e:
+    except (KeyError, ValueError) as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
 
     try:
@@ -82,32 +87,28 @@ def start_optimize(body: OptimizeRequest):
             if job.cancel_requested:
                 study.stop()
 
-        try:
-            out = run_study(
-                strategy_cls=strategy_cls,
-                symbols=symbols,
-                market=market,
-                start=body.start,
-                end=body.end,
-                cash=body.cash,
-                slippage=body.slippage,
-                n_trials=body.n_trials,
-                n_folds=body.n_folds,
-                embargo=body.embargo,
-                holdout_frac=body.holdout_frac,
-                lambda_std=body.lambda_std,
-                min_trades_per_year=body.min_trades_per_year,
-                dd_cap=body.dd_cap,
-                sparse_penalty=body.sparse_penalty if body.sparse_penalty is not None else DEFAULT_SPARSE_PENALTY,
-                param_overrides=overrides or None,
-                seed=body.seed,
-                probe_samples=body.probe_samples,
-                study_name=body.study_name,
-                callbacks=[on_trial],
-            )
-        except Exception as exc:
-            store.finish_run(run_id, status='error', error=str(exc))
-            raise
+        out = run_study(
+            strategy_cls=strategy_cls,
+            symbols=symbols,
+            market=market,
+            start=body.start,
+            end=body.end,
+            cash=body.cash,
+            slippage=body.slippage,
+            n_trials=body.n_trials,
+            n_folds=body.n_folds,
+            embargo=body.embargo,
+            holdout_frac=body.holdout_frac,
+            lambda_std=body.lambda_std,
+            min_trades_per_year=body.min_trades_per_year,
+            dd_cap=body.dd_cap,
+            sparse_penalty=body.sparse_penalty if body.sparse_penalty is not None else DEFAULT_SPARSE_PENALTY,
+            param_overrides=overrides or None,
+            seed=body.seed,
+            probe_samples=body.probe_samples,
+            study_name=body.study_name,
+            callbacks=[on_trial],
+        )
         job.progress = 1.0
         store.finish_run(
             run_id, status='done', metrics=_optimize_metrics(out['report']),
@@ -115,7 +116,27 @@ def start_optimize(body: OptimizeRequest):
         )
         return {'run_id': run_id, 'path': out['path'], 'report': out['report']}
 
-    job = job_manager.submit('optimize', run)
+    def run_wrapped(job):
+        """Mirrors the backtest router's wrapper, and for the same reason: the
+        run row is inserted as ``running`` before the job starts, so *every*
+        exit path has to write a terminal status back to it.
+
+        The inner ``try`` this replaces wrapped only ``run_study``, leaving the
+        ``market_cache.get`` above it bare -- and that is the call that fails
+        on an undownloaded symbol or a malformed date, the two most likely
+        ways to get this wrong from the form. The row was then left at
+        ``running`` forever: ``store._prune_locked`` deliberately never
+        deletes a running row (a live study must outlive the prune), and the
+        panel lists only ``kind='backtest'``, so the orphan was both immortal
+        and invisible.
+        """
+        try:
+            return run(job)
+        except Exception as exc:
+            store.finish_run(run_id, status='error', error=str(exc))
+            raise
+
+    job = job_manager.submit('optimize', run_wrapped)
     return {'job_id': job.id, 'run_id': run_id}
 
 
@@ -155,6 +176,32 @@ def get_report(name: str):
     path = _report_path(name)
     with open(path, encoding='utf-8') as f:
         return jsonable(json.load(f))
+
+
+@router.delete('/reports/{name}')
+def delete_report(name: str):
+    """Deletes the report JSON, and only that.
+
+    The study's Optuna storage (``{study_name}.db``, sitting beside it in the
+    same directory) is deliberately left alone: ``run_study`` opens it with
+    ``load_if_exists=True``, so one db backs *every* run of that study name
+    and several reports can describe the same file. Removing it here would
+    silently reset a search that the reports still standing continue to
+    describe -- and would be unreachable from this endpoint's name.
+
+    The run-history row for a web-launched study is likewise independent:
+    it ages out on its own retention, and nothing here should reach into it.
+    """
+    path = _report_path(name)
+    try:
+        os.remove(path)
+    except FileNotFoundError as e:
+        # `_report_path` checked existence a moment ago, so losing the race is
+        # someone else deleting the same report -- a second browser tab, or the
+        # file being cleared on disk. That is the 404 this endpoint already has
+        # a shape for, not a 500.
+        raise HTTPException(status_code=404, detail=f'Unknown report {name!r}') from e
+    return {'deleted': name}
 
 
 @router.post('/reports/{name}/holdout')

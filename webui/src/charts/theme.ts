@@ -47,13 +47,16 @@ export function baseOption(dark: boolean): EChartsOption {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function valueAxis(dark: boolean, overrides: any = {}) {
   const { ink } = chartTokens(dark)
+  // `axisLabel` is merged rather than replaced: callers override only the
+  // formatter and still want the themed color/size.
+  const { axisLabel, ...rest } = overrides
   return {
     type: 'value' as const,
     axisLine: { show: false },
     axisTick: { show: false },
     splitLine: { lineStyle: { color: ink.grid } },
-    axisLabel: { color: ink.muted, fontSize: 11 },
-    ...overrides,
+    axisLabel: { color: ink.muted, fontSize: 11, ...axisLabel },
+    ...rest,
   }
 }
 

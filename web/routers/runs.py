@@ -1,4 +1,4 @@
-"""Run history: list/get/compare/delete over ``web.store``'s SQLite index.
+"""Run history: list/get/delete over ``web.store``'s SQLite index.
 
 Equity curves and trade logs live in the per-run JSON artifact
 (``results/web/{id}.json``), not in a response model here -- see
@@ -23,27 +23,13 @@ def _run_summary(row: dict) -> dict:
 
 
 @router.get('')
-def list_runs(kind: str = None, limit: int = 100):
+def list_runs(kind: str = None, limit: int = Query(100, ge=1, le=1000)):
+    """``ge=1`` is load-bearing, not decoration: SQLite reads a negative
+    ``LIMIT`` as no limit at all, so ``?limit=-1`` walked straight past the cap
+    this endpoint appeared to have and returned every row in the table, metrics
+    and params included. ``le`` bounds the honest end of the same request.
+    """
     return [_run_summary(r) for r in store.list_runs(kind=kind, limit=limit)]
-
-
-@router.get('/compare')
-def compare_runs(ids: str = Query(..., description='Comma-separated run ids')):
-    run_ids = [i.strip() for i in ids.split(',') if i.strip()]
-    rows = []
-    curves = {}
-    for run_id in run_ids:
-        row = store.get_run(run_id)
-        if row is None:
-            raise HTTPException(status_code=404, detail=f'Unknown run {run_id!r}')
-        rows.append(_run_summary(row))
-        artifact = store.get_artifact(run_id)
-        if artifact and artifact.get('equity_records'):
-            curves[run_id] = [
-                {'date': str(r['date']), 'equity': r['equity']}
-                for r in artifact['equity_records']
-            ]
-    return jsonable({'runs': rows, 'equity_curves': curves})
 
 
 @router.get('/{run_id}')

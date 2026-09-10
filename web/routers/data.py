@@ -37,10 +37,16 @@ def coverage():
 
 @router.post('/update')
 def start_update(body: DataUpdateRequest):
-    try:
-        symbols = require_products(body.symbols) if body.symbols else list_products()
-    except KeyError as e:
-        raise HTTPException(status_code=422, detail=str(e)) from e
+    if body.symbols is None:
+        symbols = list_products()
+    else:
+        # An explicit empty list reaches `require_products` and comes back a
+        # 422, which is the point: it is a caller who selected nothing, not a
+        # caller asking for the whole catalogue.
+        try:
+            symbols = require_products(body.symbols)
+        except (KeyError, ValueError) as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
 
     # Claim the symbols before submitting, so the check and the claim cannot
     # be interleaved by a second request arriving between them.

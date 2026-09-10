@@ -99,7 +99,12 @@ export function candlestickOption(
       categoryAxis(dark, dates, { gridIndex: 1 }),
     ],
     yAxis: [
-      valueAxis(dark, { gridIndex: 0, scale: true }),
+      valueAxis(dark, {
+        gridIndex: 0,
+        scale: true,
+        axisLabel: { formatter: (v: number) => v.toFixed(2) },
+        axisPointer: { label: { formatter: (p: { value: number | string }) => Number(p.value).toFixed(2) } },
+      }),
       valueAxis(dark, { gridIndex: 1, splitNumber: 2 }),
     ],
     dataZoom: [
@@ -110,6 +115,8 @@ export function candlestickOption(
       {
         type: 'candlestick',
         data: ohlc,
+        // Prices to two decimals; the volume series below keeps raw counts.
+        tooltip: { valueFormatter: (v: unknown) => (typeof v === 'number' ? v.toFixed(2) : String(v)) },
         itemStyle: {
           color: CANDLE.up,
           color0: CANDLE.down,

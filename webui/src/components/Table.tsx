@@ -13,6 +13,7 @@ export function Table<T>({
   rows,
   rowKey,
   onRowClick,
+  rowClassName,
   emptyMessage,
   maxHeight,
 }: {
@@ -20,6 +21,7 @@ export function Table<T>({
   rows: T[]
   rowKey: (row: T) => string
   onRowClick?: (row: T) => void
+  rowClassName?: (row: T) => string | undefined
   emptyMessage?: string
   maxHeight?: number | string
 }) {
@@ -43,6 +45,7 @@ export function Table<T>({
           {rows.map((row) => (
             <tr
               key={rowKey(row)}
+              className={rowClassName?.(row)}
               onClick={onRowClick ? () => onRowClick(row) : undefined}
               style={onRowClick ? { cursor: 'pointer' } : undefined}
             >

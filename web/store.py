@@ -1,7 +1,7 @@
 """Run-history index: a small SQLite table, one row per backtest or optimize
 run. Equity curves and trade logs are deliberately NOT stored here --
 they go to ``results/web/{run_id}.json`` (see ``web.config.WEB_RESULTS_DIR``)
-so the index stays a few KB per row and the history/compare list is a plain
+so the index stays a few KB per row and the history list is a plain
 table scan, not a JSON blob scan.
 
 ``metrics_json`` is stored via a plain ``json.dumps``/``json.loads`` round
@@ -19,6 +19,7 @@ were infinite. Everything that does reach the browser goes through
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import threading
@@ -28,6 +29,8 @@ from typing import Iterable, List, Optional
 
 from web.config import DB_PATH, RUN_RETENTION, WEB_RESULTS_DIR
 from web.serialize import jsonable
+
+logger = logging.getLogger('futurestoolkit.web')
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -63,7 +66,38 @@ def _connect() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute('PRAGMA journal_mode=WAL')
     conn.executescript(_SCHEMA)
+    _adopt_orphaned_runs(conn)
     return conn
+
+
+def _adopt_orphaned_runs(conn: sqlite3.Connection) -> None:
+    """Close out rows left ``running`` by a process that is no longer here.
+
+    The job registry behind those rows is an in-memory dict in
+    ``web.jobs`` -- it does not survive a restart, so nothing is left that
+    could ever call ``finish_run`` on them. They were also the one status
+    ``_prune_locked`` deliberately never deletes, so a server killed
+    mid-backtest left a row that was both permanently ``running`` and
+    permanently unprunable, and each one took a slot in the newest-N window
+    that keeps real history alive.
+
+    Safe to do at connect time precisely because of that in-memory registry:
+    any row still ``running`` when this process first opens the index belongs
+    to a previous one. The panel is single-process by design (see
+    ``web/config.py``); two servers sharing one database would need a
+    heartbeat rather than this.
+    """
+    cur = conn.execute(
+        "UPDATE runs SET status='interrupted', error=? WHERE status='running'",
+        ('The server exited while this run was still in flight; '
+         'its result was never written.',),
+    )
+    conn.commit()
+    if cur.rowcount:
+        logger.warning(
+            '%d run(s) were left in flight by a previous server process and have been '
+            'marked interrupted.', cur.rowcount,
+        )
 
 
 _conn: Optional[sqlite3.Connection] = None

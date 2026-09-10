@@ -66,10 +66,16 @@ def pbo_cscv(returns_matrix: np.ndarray, n_blocks: int = 16) -> dict:
     apparent IS winner have handed you a coin-flip-or-worse OOS trial.
     """
     n_trials, n_bars = returns_matrix.shape
-    if n_trials < 2:
+    if n_trials < 2 or n_bars < 2:
         return {'pbo': float('nan'), 'n_combinations': 0, 'n_blocks': 0}
 
-    n_blocks = max(2, min(n_blocks - (n_blocks % 2), n_bars))
+    # Clamp first, *then* force an even count. The other order ran the parity
+    # adjustment inside the `min`, so clamping to a short `n_bars` could hand
+    # back an odd number again -- 15 bars gave 15 blocks, splitting 7
+    # in-sample against 8 out-of-sample. CSCV's whole premise is that the two
+    # halves are interchangeable, which an asymmetric split quietly breaks.
+    n_blocks = max(2, min(n_blocks, n_bars))
+    n_blocks -= n_blocks % 2
     if n_blocks < 2:
         return {'pbo': float('nan'), 'n_combinations': 0, 'n_blocks': n_blocks}
 
@@ -146,6 +152,15 @@ def plateau_check(strategy_cls: type, space: dict, best_params: dict, evaluate: 
     noise rather than a real, robust edge.
     """
     base_score = evaluate(best_params)
+    # `abs(base_score) > 1e-9`, not `base_score > 1e-9`. Gating on the *sign*
+    # meant a search whose best score was negative -- the normal outcome for a
+    # space with no edge, and precisely when this check earns its keep -- left
+    # `drops` empty for every dimension, so `max_drop` fell to 0.0 and the
+    # report came back reading "flat neighbourhood, no spikes" for a check
+    # that never ran. A neighbour at -4.0 against a base of -1.5 is still a
+    # collapse; dividing by the magnitude says so, and a neighbour that scores
+    # *better* still yields a negative drop and flags nothing.
+    measurable = abs(base_score) > 1e-9
     results = {}
     for name, spec in space.items():
         if name not in best_params:
@@ -156,8 +171,16 @@ def plateau_check(strategy_cls: type, space: dict, best_params: dict, evaluate: 
             if not check_constraints(strategy_cls, candidate):
                 continue
             neighbor_score = evaluate(candidate)
-            if base_score > 1e-9:
+            if measurable:
                 drops.append((base_score - neighbor_score) / abs(base_score))
         max_drop = max(drops) if drops else 0.0
-        results[name] = {'max_drop_pct': max_drop * 100.0, 'flags_spike': max_drop > 0.30}
+        results[name] = {
+            'max_drop_pct': max_drop * 100.0,
+            'flags_spike': bool(drops) and max_drop > 0.30,
+            # A base score of ~0 leaves no scale to measure a relative drop
+            # against, and every neighbour may be ruled out by the strategy's
+            # own constraints. Either way the answer is "not checked", which
+            # has to be distinguishable from "checked and flat".
+            'evaluated': bool(drops),
+        }
     return {'base_score': base_score, 'dimensions': results}

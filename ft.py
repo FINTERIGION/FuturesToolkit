@@ -339,11 +339,29 @@ def cmd_holdout(args) -> None:
 def cmd_web(args) -> None:
     import uvicorn
 
+    from web.config import ALLOWED_HOSTS_ENV
+
     if args.host not in ('127.0.0.1', 'localhost'):
+        # The panel refuses a Host header it does not recognise, which is what
+        # stops a web page the user has open from driving this API through
+        # their browser. On loopback the defaults cover it; bound anywhere else
+        # the Host is whatever name the operator reaches the box by, and
+        # nothing here can guess that -- so stand the check down unless they
+        # named the hosts themselves, rather than serving a panel that answers
+        # nothing.
+        if not os.environ.get(ALLOWED_HOSTS_ENV):
+            os.environ[ALLOWED_HOSTS_ENV] = '*'
+            host_note = (
+                ' The Host header check is off for this bind; set '
+                f'{ALLOWED_HOSTS_ENV} to a comma-separated list of the '
+                'hostnames you serve it under to turn it back on.'
+            )
+        else:
+            host_note = f' Host header restricted to {ALLOWED_HOSTS_ENV}.'
         logger.warning(
             'Binding to %s: this panel has no authentication and can rewrite the '
             'product registry and delete data files. Only do this on a network '
-            'you trust.', args.host,
+            'you trust.%s', args.host, host_note,
         )
     uvicorn.run('web.app:app', host=args.host, port=args.port, reload=args.reload)
 

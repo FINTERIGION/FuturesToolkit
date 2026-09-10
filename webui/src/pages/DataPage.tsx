@@ -1,6 +1,7 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { errorMessage } from '../api/client'
 import { dataApi } from '../api/endpoints'
 import type { Coverage } from '../api/types'
 import { Table } from '../components/Table'
@@ -8,12 +9,23 @@ import type { Column } from '../components/Table'
 import { JobProgress } from '../components/JobProgress'
 import { useJob } from '../hooks/useJob'
 
+/** Exclusive update modes; the API rejects force + rebuild_only together. */
+type UpdateMode = 'incremental' | 'force' | 'rebuild'
+
+const UPDATE_MODES: UpdateMode[] = ['incremental', 'force', 'rebuild']
+
+const MODE_LABELS: Record<UpdateMode, string> = {
+  incremental: 'data.modeIncremental',
+  force: 'data.modeForce',
+  rebuild: 'data.modeRebuild',
+}
+
 export function DataPage() {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const [selected, setSelected] = useState<string[]>([])
-  const [force, setForce] = useState(false)
-  const [rebuildOnly, setRebuildOnly] = useState(false)
+  const [mode, setMode] = useState<UpdateMode>('incremental')
+  const [error, setError] = useState<string | null>(null)
   const job = useJob()
 
   const { data: coverage, isLoading } = useQuery({
@@ -26,8 +38,20 @@ export function DataPage() {
   }
 
   const runUpdate = async (symbols: string[]) => {
-    const { job_id } = await dataApi.update(symbols, force, rebuildOnly)
-    job.start(job_id)
+    // This request really can be refused, and used to be refused in silence:
+    // the backend claims each symbol in `_inflight` and answers 409 while a
+    // download of it is already running (web/routers/data.py). `job.isActive`
+    // does not cover that -- reload the page mid-download and this component's
+    // job state is gone, so the buttons come back enabled while the server's
+    // claim stands. Unhandled, the rejected promise went to the console and
+    // the click looked like it did nothing at all.
+    setError(null)
+    try {
+      const { job_id } = await dataApi.update(symbols, mode === 'force', mode === 'rebuild')
+      job.start(job_id)
+    } catch (err) {
+      setError(errorMessage(err))
+    }
   }
 
   useEffect(() => {
@@ -36,11 +60,33 @@ export function DataPage() {
     }
   }, [job.state?.status, queryClient])
 
+  // An empty table is not "all selected": with `coverage` loaded but empty,
+  // comparing the two lengths made 0 === 0 true and the header box rendered
+  // ticked with nothing to tick.
+  const allSelected = (coverage?.length ?? 0) > 0 && selected.length === coverage?.length
+
   const columns: Column<Coverage>[] = [
     {
       key: 'select',
-      header: <input type="checkbox" checked={selected.length === (coverage?.length ?? -1)} onChange={(e) => setSelected(e.target.checked ? (coverage ?? []).map((c) => c.symbol) : [])} />,
-      render: (c) => <input type="checkbox" checked={selected.includes(c.symbol)} onChange={() => toggle(c.symbol)} />,
+      header: (
+        <input
+          type="checkbox"
+          checked={allSelected}
+          onChange={(e) => setSelected(e.target.checked ? (coverage ?? []).map((c) => c.symbol) : [])}
+          title={allSelected ? t('common.deselectAll') : t('common.selectAll')}
+        />
+      ),
+      // The row itself toggles; the box has to swallow its own click or the
+      // two handlers would fire in turn and cancel each other out. Keeping
+      // the onChange leaves the box keyboard-operable.
+      render: (c) => (
+        <input
+          type="checkbox"
+          checked={selected.includes(c.symbol)}
+          onChange={() => toggle(c.symbol)}
+          onClick={(e) => e.stopPropagation()}
+        />
+      ),
       width: '32px',
     },
     { key: 'symbol', header: t('data.symbol'), render: (c) => <strong>{c.symbol}</strong> },
@@ -69,15 +115,22 @@ export function DataPage() {
         <p>{t('data.subtitle')}</p>
       </div>
 
+      {error && <div className="hint-banner warning">{t('common.updateFailed')} — {error}</div>}
+
       <div className="toolbar">
-        <label className="checkbox-row" style={{ margin: 0 }}>
-          <input type="checkbox" checked={force} onChange={(e) => setForce(e.target.checked)} />
-          {t('data.force')}
-        </label>
-        <label className="checkbox-row" style={{ margin: 0 }}>
-          <input type="checkbox" checked={rebuildOnly} onChange={(e) => setRebuildOnly(e.target.checked)} />
-          {t('data.rebuildOnly')}
-        </label>
+        <span className="toolbar-label">{t('data.mode')}</span>
+        {UPDATE_MODES.map((m) => (
+          <label key={m} className="checkbox-row" style={{ margin: 0 }}>
+            <input
+              type="radio"
+              name="data-update-mode"
+              checked={mode === m}
+              onChange={() => setMode(m)}
+              disabled={job.isActive}
+            />
+            {t(MODE_LABELS[m])}
+          </label>
+        ))}
         <div className="spacer" />
         <button className="btn" onClick={() => void runUpdate(selected)} disabled={selected.length === 0 || job.isActive}>
           {t('data.update')} ({selected.length})
@@ -90,7 +143,13 @@ export function DataPage() {
       {job.state && (
         <div className="card" style={{ marginBottom: 16 }}>
           <div className="card-body">
-            <JobProgress state={job.state} logs={job.logs} onCancel={job.cancel} streaming={job.streaming} />
+            <JobProgress
+              state={job.state}
+              logs={job.logs}
+              onCancel={job.cancel}
+              streaming={job.streaming}
+              lost={job.lost}
+            />
           </div>
         </div>
       )}
@@ -98,7 +157,13 @@ export function DataPage() {
       {isLoading ? (
         <div className="empty-state">{t('common.loading')}</div>
       ) : (
-        <Table columns={columns} rows={coverage ?? []} rowKey={(c) => c.symbol} />
+        <Table
+          columns={columns}
+          rows={coverage ?? []}
+          rowKey={(c) => c.symbol}
+          onRowClick={(c) => toggle(c.symbol)}
+          rowClassName={(c) => (selected.includes(c.symbol) ? 'row-selectable row-selected' : 'row-selectable')}
+        />
       )}
     </div>
   )

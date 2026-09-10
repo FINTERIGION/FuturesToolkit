@@ -47,18 +47,51 @@ export function OptimizeReportsList() {
     holdoutMutation.mutate({ name: report.name, force: false })
   }
 
-  const sendToBacktest = async (name: string) => {
-    const full = await optimizeApi.report(name)
-    navigate('/backtest', {
-      state: {
-        strategy: full.strategy_key,
-        symbols: full.symbols,
-        start: full.start,
-        end: full.end,
-        params: full.best_params,
-      },
-    })
+  const deleteMutation = useMutation({
+    mutationFn: (name: string) => optimizeApi.remove(name),
+    onSuccess: (_data, name) => {
+      void queryClient.invalidateQueries({ queryKey: ['optimize-reports'] })
+      // The drawer reads a report that no longer exists; leaving it open
+      // would sit on a stale copy with live-looking action buttons.
+      setViewName((current) => (current === name ? null : current))
+    },
+    onError: (err) => window.alert(errorMessage(err)),
+  })
+
+  const deleteReport = (report: OptimizeReportSummary) => {
+    // An evaluated holdout is spent -- the report file is the only place that
+    // fact is written down, so deleting it is not the same act as deleting an
+    // untouched one and does not get the same one-line confirmation.
+    const message = report.holdout_evaluated
+      ? t('optimize.deleteReportHoldoutConfirm', { name: report.name })
+      : t('optimize.deleteReportConfirm', { name: report.name })
+    if (!window.confirm(message)) return
+    deleteMutation.mutate(report.name)
   }
+
+  // A mutation rather than a bare async call, for the same reason the two
+  // above are: the fetch can fail -- the report may have been deleted from
+  // `results/optuna/` since this list was rendered -- and an unhandled
+  // rejection made the button look inert. `cash`/`slippage` travel with it, so
+  // the backtest reproduces what the study was tuned under rather than
+  // whatever the form last remembered.
+  const sendToBacktestMutation = useMutation({
+    mutationFn: (name: string) => optimizeApi.report(name),
+    onSuccess: (full) => {
+      navigate('/backtest', {
+        state: {
+          strategy: full.strategy_key,
+          symbols: full.symbols,
+          start: full.start,
+          end: full.end,
+          cash: full.cash,
+          slippage: full.slippage,
+          params: full.best_params,
+        },
+      })
+    },
+    onError: (err) => window.alert(errorMessage(err)),
+  })
 
   const columns: Column<OptimizeReportSummary>[] = [
     { key: 'strategy', header: t('common.strategy'), render: (r) => r.strategy },
@@ -77,16 +110,41 @@ export function OptimizeReportsList() {
     {
       key: 'actions',
       header: t('common.actions'),
+      // Every button here sits inside the row's own click target, so each has
+      // to swallow its own click -- without that, running a holdout or
+      // confirming a delete would pop the detail drawer open on top of it.
       render: (r) => (
         <div style={{ display: 'flex', gap: 6 }}>
-          <button className="btn btn-sm" onClick={() => setViewName(r.name)}>
-            {t('common.view')}
-          </button>
-          <button className="btn btn-sm" onClick={() => runHoldout(r)} disabled={holdoutMutation.isPending}>
+          <button
+            className="btn btn-sm"
+            onClick={(e) => {
+              e.stopPropagation()
+              runHoldout(r)
+            }}
+            disabled={holdoutMutation.isPending}
+          >
             {t('optimize.runHoldout')}
           </button>
-          <button className="btn btn-sm btn-primary" onClick={() => void sendToBacktest(r.name)}>
+          <button
+            className="btn btn-sm btn-primary"
+            onClick={(e) => {
+              e.stopPropagation()
+              sendToBacktestMutation.mutate(r.name)
+            }}
+            disabled={sendToBacktestMutation.isPending}
+          >
             {t('optimize.sendToBacktest')}
+          </button>
+          <button
+            className="btn btn-sm btn-danger"
+            onClick={(e) => {
+              e.stopPropagation()
+              deleteReport(r)
+            }}
+            disabled={deleteMutation.isPending}
+            title={t('optimize.deleteReport')}
+          >
+            {t('common.delete')}
           </button>
         </div>
       ),
@@ -95,7 +153,18 @@ export function OptimizeReportsList() {
 
   return (
     <>
-      <Table columns={columns} rows={reports ?? []} rowKey={(r) => r.name} />
+      {/* The row is the way into the detail drawer -- there is no View
+          button, so `row-selectable` is what stops a click that lands
+          between the action buttons from selecting the cell text instead,
+          and `row-open` is what shows which report the drawer is reading. */}
+      <Table
+        columns={columns}
+        rows={reports ?? []}
+        rowKey={(r) => r.name}
+        emptyMessage={t('optimize.noReports')}
+        onRowClick={(r) => setViewName(r.name)}
+        rowClassName={(r) => (viewName === r.name ? 'row-open row-selectable' : 'row-selectable')}
+      />
       <Drawer open={viewName !== null} onClose={() => setViewName(null)} title={viewName ?? ''}>
         {viewLoading && <p>{t('common.loading')}</p>}
         {viewReport && (

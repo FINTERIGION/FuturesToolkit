@@ -14,6 +14,35 @@ DB_PATH = os.path.join(RESULTS_DIR, 'webpanel.db')
 DEFAULT_HOST = '127.0.0.1'
 DEFAULT_PORT = 8000
 
+# Host header allowlist, enforced by TrustedHostMiddleware in `web.app`.
+#
+# Binding to 127.0.0.1 keeps other machines out, but it does not keep a *web
+# page* out: a site the user is browsing can point a hostname it controls at
+# 127.0.0.1 (DNS rebinding) and drive this API from their own browser, which
+# is an unauthenticated surface that rewrites the product registry and deletes
+# data files. The browser sends the attacker's hostname in the Host header, so
+# refusing anything but the names the panel is actually served under closes it.
+#
+# `ft.py web` sets FT_WEB_ALLOWED_HOSTS when asked to bind somewhere other than
+# loopback, because the Host header is then whatever name the operator reaches
+# the box by and no default here could guess it.
+ALLOWED_HOSTS_ENV = 'FT_WEB_ALLOWED_HOSTS'
+DEFAULT_ALLOWED_HOSTS = ('localhost', '127.0.0.1', '[::1]')
+
+
+def allowed_hosts() -> list:
+    """Host names this panel will answer to, newest environment wins.
+
+    Read at call time rather than import time so a test (or `ft.py web`
+    setting the variable before uvicorn imports the app) can change it.
+    Ports are not included: Starlette strips the port before matching.
+    """
+    raw = os.environ.get(ALLOWED_HOSTS_ENV, '').strip()
+    if not raw:
+        return list(DEFAULT_ALLOWED_HOSTS)
+    return [h.strip() for h in raw.split(',') if h.strip()]
+
+
 MARKET_CACHE_SIZE = 3
 JOB_MAX_WORKERS = 2
 JOB_LOG_BUFFER = 2000

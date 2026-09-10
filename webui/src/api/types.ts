@@ -176,11 +176,6 @@ export interface RunPrice {
   signals: Array<{ date: string; price: number; direction: string; size: number; comm: number; symbol: string }>
 }
 
-export interface CompareResult {
-  runs: RunSummary[]
-  equity_curves: Record<string, Array<{ date: string; equity: number }>>
-}
-
 // -------------------------------------------------------------------------
 
 export interface JobState {
@@ -215,6 +210,12 @@ export interface OptimizeReport {
   symbols: string[]
   start: string
   end: string
+  // The cost assumptions the study optimised under. Written by
+  // research/optimize.py and needed to reproduce a report's numbers -- a
+  // backtest of `best_params` under different cash or slippage is a different
+  // run, however tuned the parameters are.
+  cash: number
+  slippage: number
   best_params: Record<string, unknown>
   best_value: number
   fold_train_scores: number[]
@@ -224,7 +225,17 @@ export interface OptimizeReport {
     is_oos_decay: { is_score: number; oos_score: number; ratio: number; warn: boolean }
     pbo: { pbo: number | null; n_combinations: number; n_blocks: number }
     dsr: { dsr: number | null; sr0: number | null; sr_hat: number | null }
-    plateau: { base_score: number; dimensions: Record<string, { max_drop_pct: number; flags_spike: boolean }> }
+    plateau: {
+      base_score: number
+      dimensions: Record<
+        string,
+        // `evaluated: false` means the neighbourhood was never scored (every
+        // neighbour ruled out by a constraint, or a base score too near zero
+        // to measure a relative drop against), so `max_drop_pct: 0` there is
+        // "not checked", not "flat".
+        { max_drop_pct: number; flags_spike: boolean; evaluated: boolean }
+      >
+    }
   }
   holdout_evaluated: boolean
   holdout_runs: number

@@ -14,6 +14,7 @@ initial_cash``) hold by construction rather than by coincidence.
 
 from __future__ import annotations
 
+import logging
 from datetime import date as Date
 from typing import Dict, List, Optional
 
@@ -21,6 +22,8 @@ from datafeed.products import product_costs
 
 from .broker import Broker
 from .types import Fill, Reason
+
+logger = logging.getLogger(__name__)
 
 TRADE_LOG_FIELDS = [
     'trade_id', 'open_date', 'close_date', 'direction', 'symbol',
@@ -129,6 +132,18 @@ class Ledger:
         for symbol, held in legs.items():
             row = self._open.get(symbol)
             if row is None:
+                # The broker holds size this ledger has no open row for, which
+                # means the two went out of step somewhere upstream. Its P&L
+                # cannot be booked into a trade that was never opened, so it
+                # will surface as `compute_metrics`' reconciliation drift --
+                # three layers away, with nothing naming the symbol. Say it
+                # here, where the symbol and the size are still in hand.
+                logger.warning(
+                    "%s: %d contract leg(s) still open at the end of the run with no "
+                    "open trade row to close them into (%s). Their P&L is absent from "
+                    "the trade log and will show up as reconciliation drift.",
+                    symbol, len(held), ', '.join(c for c, _ in held),
+                )
                 continue
             multiplier = product_costs(symbol)['multiplier']
             for contract, pos in held:

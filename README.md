@@ -14,7 +14,7 @@ It downloads historical data straight from each exchange, builds open-interest�
 - **Metrics & reports** — Sharpe, Sortino, Calmar, max drawdown & recovery, win rate, turnover, capital exposure, per-symbol and per-exit-reason breakdowns, forced-liquidation count
 - **Charts** — equity, returns, position, price & signals, summary plots
 - **Parameter tuning** — Optuna parameter optimization with anchored walk-forward validation, a locked holdout window, and overfitting diagnostics (PBO, Deflated Sharpe, IS/OOS decay, plateau check)
-- **Web panel** — a local browser UI for managing products, downloading data, running backtests and Optuna tuning with live progress, and comparing run history
+- **Web panel** — a local browser UI for managing products, downloading data, running backtests and Optuna tuning with live progress, and browsing run history
 
 ## Quick Start
 
@@ -57,22 +57,23 @@ Or drive all of it from the browser.
 python ft.py web
 ```
 
-| Subcommand | What it does |
-| --- | --- |
-| `data` | Download exchange history, rebuild OI-weighted daily bars |
-| `backtest` | Run one strategy over a date range |
-| `show-space` | Print a strategy's tunable search space |
-| `optimize` | Optuna anchored walk-forward parameter search |
-| `holdout` | Evaluate an optimize report on its locked holdout window (once) |
-| `web` | Serve the browser panel |
+| Subcommand   | What it does                                                    |
+| ------------ | --------------------------------------------------------------- |
+| `data`       | Download exchange history, rebuild OI-weighted daily bars       |
+| `backtest`   | Run one strategy over a date range                              |
+| `show-space` | Print a strategy's tunable search space                         |
+| `optimize`   | Optuna anchored walk-forward parameter search                   |
+| `holdout`    | Evaluate an optimize report on its locked holdout window (once) |
+| `web`        | Serve the browser panel                                         |
 
 ## Documentation
 
-| Page | Contents |
-| --- | --- |
-| [Data Pipeline](docs/data.md) | Exchange downloads, `ft.py data` flags, generated files, product registry |
-| [Backtesting](docs/backtest.md) | `ft.py backtest` flags, four-phase execution model, outputs, metrics |
-| [Writing a Strategy](docs/strategy.md) | `Strategy` lifecycle, `SetupContext` / `BarContext` API, conventions |
+| Page                                       | Contents                                                                              |
+| ------------------------------------------ | ------------------------------------------------------------------------------------- |
+| [Data Pipeline](docs/data.md)              | Exchange downloads, `ft.py data` flags, generated files, product registry             |
+| [Backtesting](docs/backtest.md)            | `ft.py backtest` flags, four-phase execution model, outputs, metrics                  |
+| [Writing a Strategy](docs/strategy.md)     | `Strategy` lifecycle, `SetupContext` / `BarContext` API, conventions                  |
 | [Parameter Optimization](docs/research.md) | `ft.py optimize` / `holdout`, walk-forward splits, objective, overfitting diagnostics |
-| [Web Panel](docs/web.md) | Browser UI for products, data, backtest, optimize, run history |
-| [Project Layout](docs/architecture.md) | Directory map, tests |
+| [Web Panel](docs/web.md)                   | Browser UI for products, data, backtest, optimize, run history                        |
+| [Project Layout](docs/architecture.md)     | Directory map, tests                                                                  |
+

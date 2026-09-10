@@ -26,8 +26,20 @@ web = [
     "httpx==0.28.1",
 ]
 
-[tool.setuptools]
-packages = ["core", "datafeed", "strategies", "research", "web"]
+# `find` rather than an explicit `packages` list: the list form does not
+# recurse, so `web.routers` was absent from every built wheel and a non-editable
+# install failed at `import web.app`. The include patterns keep the repo's
+# non-package top-level directories (tests, webui, docs, data, cache, results)
+# out, which is what the explicit list was buying.
+[tool.setuptools.packages.find]
+include = ["core*", "datafeed*", "strategies*", "research*", "web*"]
+
+# The product registry is data, not code, so nothing sweeps it into the wheel on
+# its own. `datafeed.products` reads it at *import* time, so a wheel without it
+# does not degrade at first use -- `import datafeed.products` raises
+# FileNotFoundError and every entry point in the project is dead.
+[tool.setuptools.package-data]
+datafeed = ["products.json"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

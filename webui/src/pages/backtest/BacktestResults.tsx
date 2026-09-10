@@ -79,6 +79,15 @@ export function BacktestResults({ runId }: { runId: string }) {
     <div className="card">
       <div className="card-body">
         <h3 style={{ marginBottom: 12 }}>{t('backtest.results')}</h3>
+        {/* Above the metrics, not below: everything under this banner
+            describes a window that ended early, and a run that never recorded
+            a bar at all (cash <= 0) has no metrics under it whatsoever -- an
+            unexplained grid of "n/a" is exactly what this replaces. */}
+        {Boolean(run.metrics?.blown_up) && (
+          <div className="hint-banner danger">
+            <strong>{t('backtest.blownUp')}</strong> — {t('backtest.blownUpHint')}
+          </div>
+        )}
         {run.metrics && <MetricStats metrics={run.metrics} />}
 
         <div style={{ marginTop: 16 }}>

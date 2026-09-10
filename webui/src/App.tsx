@@ -4,7 +4,6 @@ import { BacktestPage } from './pages/BacktestPage'
 import { DataPage } from './pages/DataPage'
 import { OptimizePage } from './pages/OptimizePage'
 import { ProductsPage } from './pages/ProductsPage'
-import { RunsPage } from './pages/RunsPage'
 
 export default function App() {
   return (
@@ -17,7 +16,6 @@ export default function App() {
           <Route path="/data" element={<DataPage />} />
           <Route path="/backtest" element={<BacktestPage />} />
           <Route path="/optimize" element={<OptimizePage />} />
-          <Route path="/runs" element={<RunsPage />} />
         </Routes>
       </main>
     </>

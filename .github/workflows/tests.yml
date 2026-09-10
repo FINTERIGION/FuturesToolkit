@@ -28,3 +28,29 @@ jobs:
 
       - name: Run tests
         run: pytest
+
+  webui:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: webui
+    steps:
+      - uses: actions/checkout@v4
+
+      # vite 8 needs ^20.19 || >=22.12 and vitest 4 needs ^20 || ^22 || >=24;
+      # 22 satisfies both with room to spare.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+
+      - run: npm ci
+
+      # `build` is `tsc -b && vite build`, so this typechecks the tests too --
+      # they are inside tsconfig's include and would otherwise only be checked
+      # by whoever happened to run tsc locally. Output goes to web/static/,
+      # which is gitignored.
+      - run: npm run build
+
+      - run: npm test

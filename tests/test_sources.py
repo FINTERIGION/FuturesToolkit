@@ -4,8 +4,10 @@ Everything here runs offline against inline fixtures -- no exchange is contacted
 matching the "synthetic data, no real CSVs" convention in conftest.py.
 """
 
+import gzip
 import json
 import os
+import threading
 import urllib.error
 from datetime import date, timedelta
 
@@ -340,6 +342,49 @@ def test_revised_tail_day_is_reported_as_refreshed(tmp_path):
     assert recent.isoformat() in revised.sync()
     assert revised._cached_payload(recent) is not None
     assert b'"v": "b"' in revised._cached_payload(recent)
+
+
+def test_concurrent_writers_cannot_corrupt_a_shared_day_cache(tmp_path):
+    """Two products on one venue may be updated at the same time.
+
+    A day payload is shared by every product on the exchange, so both writers
+    resolve the same ``cache_path``. The web panel runs two update jobs at once
+    and de-duplicates only by product (``web/routers/data.py``), which puts
+    this one extra click away rather than in the realm of theory. With the
+    fixed ``f'{path}.tmp'`` this used to be, both writers opened the *same*
+    temp file: the loser either spliced its tail into the winner's
+    already-renamed inode or died on ``FileNotFoundError`` partway through its
+    own job. Eight writers here, because the failure is a race and one pass
+    proves nothing.
+    """
+    src = _fake(tmp_path, available=[])
+    path = src.cache_path(_recent_weekday())
+    errors = []
+    barrier = threading.Barrier(8)
+
+    def writer(tag: bytes):
+        try:
+            barrier.wait()
+            for _ in range(15):
+                src._write_day(path, tag * 5000)
+        except Exception as exc:      # noqa: BLE001 -- that there are none is the assertion
+            errors.append(exc)
+
+    threads = [threading.Thread(target=writer, args=(bytes([c]),))
+               for c in b'ABCDEFGH']
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, errors
+    with gzip.open(path, 'rb') as fh:
+        payload = fh.read()
+    # Exactly one writer's bytes, whole -- not a splice of several.
+    assert len(payload) == 5000
+    assert len(set(payload)) == 1
+    # And nothing left over for `_cached_days` to walk past on the next sync.
+    assert os.listdir(src.dir) == [os.path.basename(path)]
 
 
 def test_weekends_are_never_requested(tmp_path):
