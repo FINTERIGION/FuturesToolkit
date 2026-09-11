@@ -2,7 +2,9 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { render } from '@testing-library/react'
 import type { ReactElement } from 'react'
 import { MemoryRouter } from 'react-router-dom'
-import type { StrategyInfo } from '../api/types'
+import type { RunDetail, RunSummary, StrategyInfo } from '../api/types'
+import { JobsProvider } from '../shell/JobsProvider'
+import { WorkspaceProvider } from '../shell/WorkspaceContext'
 
 /** A client that fails fast and keeps nothing between tests -- retries would
  * turn an intentionally-rejected query into a multi-second wait. */
@@ -12,13 +14,19 @@ function testQueryClient() {
   })
 }
 
-/** Render a page under the providers App gives it. `routerState` is what
- * `useLocation().state` returns -- the channel "Send to Backtest" and "Tune
- * This Strategy" hand their prefill over. */
-export function renderPage(ui: ReactElement, routerState?: unknown) {
+/** Render a panel or the whole workspace under the providers the real app
+ * gives it: react-query, a router (so `WorkspaceContext`'s URL-backed
+ * fields work), `WorkspaceProvider`, and `JobsProvider`. `path` seeds the
+ * URL -- the workspace lives entirely at `/`, with state in the query
+ * string (`?symbol=...&run=...&tab=...`). */
+export function renderWorkspace(ui: ReactElement, opts?: { path?: string }) {
   return render(
     <QueryClientProvider client={testQueryClient()}>
-      <MemoryRouter initialEntries={[{ pathname: '/backtest', state: routerState }]}>{ui}</MemoryRouter>
+      <MemoryRouter initialEntries={[opts?.path ?? '/?symbol=SA']}>
+        <WorkspaceProvider>
+          <JobsProvider>{ui}</JobsProvider>
+        </WorkspaceProvider>
+      </MemoryRouter>
     </QueryClientProvider>,
   )
 }
@@ -65,3 +73,34 @@ export const PRODUCTS = COVERAGE.map((c) => ({
   roll: { main_months: [1, 5, 9], lead_months: 1 },
   coverage: c,
 })) as never
+
+export function runRow(id: string, symbols: string[]): RunSummary {
+  return {
+    id,
+    kind: 'backtest',
+    created_at: 1_700_000_000,
+    strategy: 'DoubleMaStrategy',
+    symbols,
+    start: '2020-01-01',
+    end: '2024-01-01',
+    cash: 200000,
+    slippage: 0,
+    status: 'done',
+    params: {},
+    metrics: { sharpe_ratio: 1, blown_up: false },
+    error: null,
+  }
+}
+
+export function runDetail(id: string, symbols: string[]): RunDetail {
+  return {
+    ...runRow(id, symbols),
+    equity_records: [],
+    trade_logs: [],
+    deferred: {},
+    symbols_with_price: symbols,
+  }
+}
+
+export const EMPTY_BARS = { symbol: 'SA', bars: [] }
+export const EMPTY_ROLL = { symbol: 'SA', roll: [] }

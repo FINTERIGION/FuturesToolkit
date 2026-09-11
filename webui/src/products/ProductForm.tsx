@@ -1,18 +1,39 @@
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { errorMessage } from '../../api/client'
-import { productsApi } from '../../api/endpoints'
-import type { Product, ProductInput } from '../../api/types'
-import { candlestickOption } from '../../charts/builders'
-import { EChart } from '../../components/EChart'
-import { Drawer } from '../../components/Drawer'
-import { useIsDarkMode } from '../../theme/useIsDarkMode'
+import { errorMessage } from '../api/client'
+import { productsApi } from '../api/endpoints'
+import type { Product, ProductInput } from '../api/types'
+import { candlestickOption } from '../charts/builders'
+import { EChart } from '../components/EChart'
+import { useJobs } from '../shell/JobsProvider'
+import { useIsDarkMode } from '../theme/useIsDarkMode'
+
+/**
+ * The product create/edit form, split out of `ProductDrawer` so a future
+ * non-modal presentation (the workspace's product sidebar) can render the
+ * same fields without the modal `Drawer` chrome around them.
+ *
+ * `useProductForm` owns all state and mutations, including the footer
+ * actions (save/delete), because the footer buttons live in the caller's
+ * chrome (`Drawer`'s pinned footer slot today) while the fields render
+ * through `ProductFormFields` -- splitting them this way keeps the footer
+ * pinned to the bottom of a scrolling drawer body instead of scrolling away
+ * with the fields.
+ */
 
 type CommissionMode = 'rate' | 'per_lot'
 
-/** `seededFor` sentinel for the create form, which has no product code. */
-const NEW_PRODUCT = '\u0000new'
+/** `seededFor` sentinel for the create form, which has no product code.
+ *
+ * Any string that is not a valid product code will do -- the registry holds
+ * codes to `[A-Z0-9]+` (`datafeed/products.py`), so the angle brackets alone
+ * make a collision impossible. It was a literal NUL character, which worked
+ * as a sentinel and turned this file binary: git, grep and every diff view
+ * stopped treating it as source, so nothing here matched a search and the
+ * file's changes showed up as "Binary files differ".
+ */
+const NEW_PRODUCT = '<new>'
 
 // Rates are stored as fractions but entered in friendlier units: commission in ‱
 // (per ten-thousand) or yuan per lot; margin rates in %.
@@ -114,10 +135,40 @@ function toApiInput(form: FormState): ProductInput {
   }
 }
 
-export function ProductDrawer({ code, onClose }: { code: string | null; onClose: () => void }) {
-  const { t } = useTranslation()
+export interface ProductFormHandle {
+  isEdit: boolean
+  form: FormState
+  set: <K extends keyof FormState>(key: K, value: FormState[K]) => void
+  toggleMonth: (m: number) => void
+  exchanges: string[]
+  formError: string | null
+  showPurge: boolean
+  setShowPurge: (v: boolean) => void
+  purgeData: boolean
+  setPurgeData: (v: boolean) => void
+  save: () => void
+  saving: boolean
+  remove: () => void
+  deleting: boolean
+  barsReady: boolean
+  chartOption: ReturnType<typeof candlestickOption> | null
+  /** A backtest or data update is running. The backend refuses a registry
+   * write while any job is active -- it reads costs and roll rules live,
+   * per fill, so an edit landing mid-run would silently corrupt that run's
+   * numbers (see web/routers/products.py). Save/Delete are disabled on this
+   * rather than left to fail into a 409 after the user has already filled
+   * the form in, now that the editor sits one click from the Run button in
+   * the sidebar instead of on a separate page. The 409 path stays as the
+   * backstop for a job started from another tab or the CLI, which this flag
+   * cannot see. */
+  lockedByJob: boolean
+}
+
+export function useProductForm(code: string | null, onClose: () => void): ProductFormHandle {
   const isEdit = code !== null
   const dark = useIsDarkMode()
+  const jobs = useJobs()
+  const lockedByJob = jobs.backtest.isActive || jobs.data.isActive
 
   const { data: exchangeMeta } = useQuery({ queryKey: ['meta', 'exchanges'], queryFn: productsApi.exchanges })
   const { data: product } = useQuery({
@@ -184,57 +235,48 @@ export function ProductDrawer({ code, onClose }: { code: string | null; onClose:
     enabled: isEdit,
   })
 
-  return (
-    <Drawer
-      open
-      onClose={onClose}
-      title={isEdit ? `${t('products.editProduct')} — ${code}` : t('products.addProduct')}
-      footer={
-        <>
-          {isEdit && !showPurge && (
-            <button className="btn btn-danger" onClick={() => setShowPurge(true)}>
-              {t('common.delete')}
-            </button>
-          )}
-          {isEdit && showPurge && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1 }}>
-              <label className="checkbox-row" style={{ margin: 0 }}>
-                <input type="checkbox" checked={purgeData} onChange={(e) => setPurgeData(e.target.checked)} />
-                {t('products.purgeData')}
-              </label>
-              <div className="spacer" />
-              <button className="btn btn-sm" onClick={() => setShowPurge(false)}>
-                {t('common.cancel')}
-              </button>
-              <button className="btn btn-sm btn-danger" onClick={() => deleteMutation.mutate()} disabled={deleteMutation.isPending}>
-                {t('common.confirm')}
-              </button>
-            </div>
-          )}
-          <div className="spacer" />
-          <button className="btn" onClick={onClose}>
-            {t('common.cancel')}
-          </button>
-          <button className="btn btn-primary" onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending}>
-            {t('common.save')}
-          </button>
-        </>
-      }
-    >
-      {formError && <div className="hint-banner warning">{formError}</div>}
+  return {
+    isEdit,
+    form,
+    set,
+    toggleMonth,
+    exchanges: exchangeMeta?.exchanges ?? [form.exchange],
+    formError,
+    showPurge,
+    setShowPurge,
+    purgeData,
+    setPurgeData,
+    save: () => saveMutation.mutate(),
+    saving: saveMutation.isPending,
+    remove: () => deleteMutation.mutate(),
+    deleting: deleteMutation.isPending,
+    barsReady: barsData !== undefined,
+    chartOption: barsData ? candlestickOption(dark, barsData.bars, { roll: rollData?.roll }) : null,
+    lockedByJob,
+  }
+}
 
-      {!isEdit && (
+export { MONTHS }
+
+export function ProductFormFields({ f }: { f: ProductFormHandle }) {
+  const { t } = useTranslation()
+
+  return (
+    <>
+      {f.formError && <div className="hint-banner warning">{f.formError}</div>}
+
+      {!f.isEdit && (
         <div className="field">
           <label>{t('products.code')}</label>
-          <input value={form.code} onChange={(e) => set('code', e.target.value.toUpperCase())} placeholder="e.g. AP" />
+          <input value={f.form.code} onChange={(e) => f.set('code', e.target.value.toUpperCase())} placeholder="e.g. AP" />
         </div>
       )}
 
       <div className="form-grid">
         <div className="field">
           <label>{t('products.exchange')}</label>
-          <select value={form.exchange} onChange={(e) => set('exchange', e.target.value)}>
-            {(exchangeMeta?.exchanges ?? [form.exchange]).map((ex) => (
+          <select value={f.form.exchange} onChange={(e) => f.set('exchange', e.target.value)}>
+            {f.exchanges.map((ex) => (
               <option key={ex} value={ex}>
                 {ex}
               </option>
@@ -243,23 +285,23 @@ export function ProductDrawer({ code, onClose }: { code: string | null; onClose:
         </div>
         <div className="field">
           <label>{t('products.startYear')}</label>
-          <input type="number" value={form.start_year} onChange={(e) => set('start_year', e.target.value)} />
+          <input type="number" value={f.form.start_year} onChange={(e) => f.set('start_year', e.target.value)} />
         </div>
         <div className="field">
           <label>{t('products.name')}</label>
-          <input value={form.name} onChange={(e) => set('name', e.target.value)} />
+          <input value={f.form.name} onChange={(e) => f.set('name', e.target.value)} />
         </div>
         <div className="field">
           <label>{t('products.nameZh')}</label>
-          <input value={form.name_zh} onChange={(e) => set('name_zh', e.target.value)} />
+          <input value={f.form.name_zh} onChange={(e) => f.set('name_zh', e.target.value)} />
         </div>
         <div className="field">
           <label>{t('products.multiplier')}</label>
-          <input type="number" value={form.multiplier} onChange={(e) => set('multiplier', e.target.value)} />
+          <input type="number" value={f.form.multiplier} onChange={(e) => f.set('multiplier', e.target.value)} />
         </div>
         <div className="field">
           <label>{t('products.tickSize')}</label>
-          <input type="number" step="any" value={form.tick_size} onChange={(e) => set('tick_size', e.target.value)} />
+          <input type="number" step="any" value={f.form.tick_size} onChange={(e) => f.set('tick_size', e.target.value)} />
         </div>
         <div className="field">
           <label>{t('products.marginRate')}</label>
@@ -269,8 +311,8 @@ export function ProductDrawer({ code, onClose }: { code: string | null; onClose:
               step="any"
               min="0"
               max="100"
-              value={form.margin_rate}
-              onChange={(e) => set('margin_rate', e.target.value)}
+              value={f.form.margin_rate}
+              onChange={(e) => f.set('margin_rate', e.target.value)}
             />
             <span className="input-unit">%</span>
           </div>
@@ -278,8 +320,8 @@ export function ProductDrawer({ code, onClose }: { code: string | null; onClose:
         <div className="field">
           <label>{t('products.commissionMode')}</label>
           <div className="input-group">
-            <input type="number" step="0.1" value={form.commission_value} onChange={(e) => set('commission_value', e.target.value)} />
-            <select value={form.commission_mode} onChange={(e) => set('commission_mode', e.target.value as CommissionMode)}>
+            <input type="number" step="0.1" value={f.form.commission_value} onChange={(e) => f.set('commission_value', e.target.value)} />
+            <select value={f.form.commission_mode} onChange={(e) => f.set('commission_mode', e.target.value as CommissionMode)}>
               <option value="rate">{t('products.commissionModeRate')}</option>
               <option value="per_lot">{t('products.commissionModePerLot')}</option>
             </select>
@@ -289,8 +331,8 @@ export function ProductDrawer({ code, onClose }: { code: string | null; onClose:
           <label>{t('products.mainMonths')}</label>
           <div className="month-picker">
             {MONTHS.map((m) => (
-              <label key={m} className={`month-chip${form.main_months.includes(m) ? ' active' : ''}`}>
-                <input type="checkbox" checked={form.main_months.includes(m)} onChange={() => toggleMonth(m)} />
+              <label key={m} className={`month-chip${f.form.main_months.includes(m) ? ' active' : ''}`}>
+                <input type="checkbox" checked={f.form.main_months.includes(m)} onChange={() => f.toggleMonth(m)} />
                 <span>{m}</span>
               </label>
             ))}
@@ -298,23 +340,20 @@ export function ProductDrawer({ code, onClose }: { code: string | null; onClose:
         </div>
         <div className="field">
           <label>{t('products.rollLeadMonths')}</label>
-          <input type="number" value={form.roll_lead_months} onChange={(e) => set('roll_lead_months', e.target.value)} />
+          <input type="number" value={f.form.roll_lead_months} onChange={(e) => f.set('roll_lead_months', e.target.value)} />
         </div>
       </div>
 
-      {isEdit && (
+      {f.isEdit && (
         <div style={{ marginTop: 20 }}>
           <h3 style={{ marginBottom: 10 }}>{t('products.priceChart')}</h3>
-          {barsData ? (
-            <EChart
-              option={candlestickOption(dark, barsData.bars, { roll: rollData?.roll })}
-              height={360}
-            />
+          {f.chartOption ? (
+            <EChart option={f.chartOption} height={360} />
           ) : (
             <div className="empty-state">{t('common.loading')}</div>
           )}
         </div>
       )}
-    </Drawer>
+    </>
   )
 }

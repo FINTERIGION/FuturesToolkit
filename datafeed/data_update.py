@@ -18,6 +18,7 @@ import argparse
 import json
 import logging
 import os
+import tempfile
 from datetime import datetime
 
 import pandas as pd
@@ -79,10 +80,33 @@ def _build_weighted(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _to_csv_atomic(df: pd.DataFrame, path: str) -> None:
-    os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
-    tmp_path = f'{path}.tmp'
-    df.to_csv(tmp_path, index=False)
-    os.replace(tmp_path, path)
+    """Write ``df`` to ``path`` in one step, via a temp file in the same
+    directory.
+
+    The temp name is unique per call, not a fixed ``f'{path}.tmp'``, for the
+    reason ``sources._atomic_path`` already documents: two writers resolving
+    the same target open the same temp file, one ``os.replace`` wins, and the
+    loser either writes its tail into the winner's already-renamed inode or
+    dies on ``FileNotFoundError`` partway through. The web panel de-duplicates
+    downloads by product, but only its own -- a ``python ft.py data SA`` in a
+    terminal while the panel updates SA is two processes on this exact path.
+
+    Cleanup is a ``finally`` so a failed ``to_csv`` (or a Ctrl-C mid-write)
+    leaves nothing behind, and unconditional because a successful
+    ``os.replace`` has already moved the temp file away.
+    """
+    directory = os.path.dirname(path) or '.'
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(
+        dir=directory, prefix=f'.{os.path.basename(path)}.', suffix='.tmp',
+    )
+    os.close(fd)
+    try:
+        df.to_csv(tmp_path, index=False)
+        os.replace(tmp_path, path)
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
 
 class DataUpdate:
@@ -178,10 +202,18 @@ class DataUpdate:
             'updated_at': datetime.now().isoformat(timespec='seconds'),
         }
         os.makedirs(self.cache_dir, exist_ok=True)
-        tmp_path = f'{self._meta_path}.tmp'
-        with open(tmp_path, 'w', encoding='utf-8') as fh:
-            json.dump(payload, fh, ensure_ascii=False, indent=2)
-        os.replace(tmp_path, self._meta_path)
+        # Unique temp name and a cleaning `finally`, same as `_to_csv_atomic`
+        # above and for the same collision.
+        fd, tmp_path = tempfile.mkstemp(
+            dir=self.cache_dir, prefix=f'.{os.path.basename(self._meta_path)}.', suffix='.tmp',
+        )
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+                json.dump(payload, fh, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, self._meta_path)
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
 
     @staticmethod
     def _format_dates(df: pd.DataFrame) -> pd.DataFrame:

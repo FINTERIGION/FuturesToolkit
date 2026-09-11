@@ -23,9 +23,9 @@ DEFAULT_PORT = 8000
 # data files. The browser sends the attacker's hostname in the Host header, so
 # refusing anything but the names the panel is actually served under closes it.
 #
-# `ft.py web` sets FT_WEB_ALLOWED_HOSTS when asked to bind somewhere other than
-# loopback, because the Host header is then whatever name the operator reaches
-# the box by and no default here could guess it.
+# `ft.py web` derives FT_WEB_ALLOWED_HOSTS from the bind address when asked to
+# bind somewhere other than loopback, because the Host header is then whatever
+# name the operator reaches the box by and no default here could guess it.
 ALLOWED_HOSTS_ENV = 'FT_WEB_ALLOWED_HOSTS'
 DEFAULT_ALLOWED_HOSTS = ('localhost', '127.0.0.1', '[::1]')
 
@@ -35,12 +35,55 @@ def allowed_hosts() -> list:
 
     Read at call time rather than import time so a test (or `ft.py web`
     setting the variable before uvicorn imports the app) can change it.
-    Ports are not included: Starlette strips the port before matching.
+    Ports are not included: ``host_allowed`` strips the port before matching.
     """
     raw = os.environ.get(ALLOWED_HOSTS_ENV, '').strip()
     if not raw:
         return list(DEFAULT_ALLOWED_HOSTS)
     return [h.strip() for h in raw.split(',') if h.strip()]
+
+
+def normalize_host(raw: str) -> str:
+    """The host name out of a ``Host`` header, port removed, lowercased.
+
+    Split on the first colon and an IPv6 literal loses everything after its
+    first group: ``[::1]:8000`` becomes ``[``. That is what Starlette's
+    ``TrustedHostMiddleware`` does, and it is why the ``[::1]`` entry in
+    ``DEFAULT_ALLOWED_HOSTS`` above never matched anything -- browsing the
+    panel at ``http://[::1]:8000`` answered 400 to a name the config
+    explicitly allows. The bracketed form is kept intact here, so the entry
+    means what it reads as.
+
+    Returns ``''`` for a header with no closing bracket, which no client
+    sends and which therefore matches nothing.
+    """
+    host = (raw or '').strip()
+    if host.startswith('['):
+        end = host.find(']')
+        return host[: end + 1].lower() if end != -1 else ''
+    return host.split(':', 1)[0].lower()
+
+
+def host_allowed(raw_host: str, allowed=None) -> bool:
+    """Whether a request's ``Host`` header names this panel.
+
+    Exact match, with two carry-overs from the middleware this replaces: a
+    lone ``*`` allows anything, and a leading ``*.`` matches subdomains but
+    not the bare domain. Both sides are lowercased; host names are
+    case-insensitive and an allowlist typed by hand should not have to be.
+    """
+    patterns = [p.strip().lower() for p in (allowed if allowed is not None else allowed_hosts())]
+    if '*' in patterns:
+        return True
+    host = normalize_host(raw_host)
+    if not host:
+        return False
+    for pattern in patterns:
+        if pattern == host:
+            return True
+        if pattern.startswith('*.') and host.endswith(pattern[1:]):
+            return True
+    return False
 
 
 MARKET_CACHE_SIZE = 3

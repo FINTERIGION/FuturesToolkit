@@ -2,17 +2,19 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { productsApi } from '../../api/endpoints'
+import { productsApi } from '../api/endpoints'
+import { JobsProvider } from '../shell/JobsProvider'
 import { ProductDrawer } from './ProductDrawer'
 
-vi.mock('../../api/endpoints', () => ({
+vi.mock('../api/endpoints', () => ({
   productsApi: {
     get: vi.fn(), update: vi.fn(), create: vi.fn(), remove: vi.fn(),
     exchanges: vi.fn(), bars: vi.fn(), roll: vi.fn(),
   },
+  jobsApi: { get: vi.fn(), cancel: vi.fn(), streamUrl: (id: string) => `/api/jobs/${id}/stream` },
 }))
 
-vi.mock('../../components/EChart', () => ({ EChart: () => <div data-testid="chart" /> }))
+vi.mock('../components/EChart', () => ({ EChart: () => <div data-testid="chart" /> }))
 
 function product(margin: number, commissionRate: number) {
   return {
@@ -33,7 +35,9 @@ function renderDrawer() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false } } })
   return render(
     <QueryClientProvider client={client}>
-      <ProductDrawer code="SA" onClose={() => {}} />
+      <JobsProvider>
+        <ProductDrawer code="SA" onClose={() => {}} />
+      </JobsProvider>
     </QueryClientProvider>,
   )
 }

@@ -12,16 +12,46 @@ import os
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
-from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette.datastructures import Headers
 
-from web.config import STATIC_DIR, allowed_hosts, is_within
+from web.config import STATIC_DIR, allowed_hosts, host_allowed, is_within
 from web.routers import backtest, data, jobs, optimize, products, runs, strategies
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(name)s %(message)s')
 
 app = FastAPI(title='FuturesToolkit Web Panel')
+
+
+class HostHeaderMiddleware:
+    """Refuse any request whose ``Host`` header does not name this panel.
+
+    Stands in for Starlette's ``TrustedHostMiddleware``, which matches on
+    ``header.split(':')[0]`` and so reduces every IPv6 literal to ``[`` --
+    see ``web.config.normalize_host``. The allowlist is read once, at import,
+    the same as before; ``web.config.host_allowed`` owns the matching.
+    """
+
+    def __init__(self, app, allowed: list):
+        self.app = app
+        self.allowed = allowed
+
+    async def __call__(self, scope, receive, send):
+        if scope['type'] not in ('http', 'websocket'):
+            await self.app(scope, receive, send)
+            return
+        if host_allowed(Headers(scope=scope).get('host', ''), self.allowed):
+            await self.app(scope, receive, send)
+            return
+        if scope['type'] == 'websocket':
+            # No websocket routes today, but denying rather than falling
+            # through keeps the check total: a route added later is covered
+            # by this without anyone having to remember it.
+            await send({'type': 'websocket.close', 'code': 1008})
+            return
+        await PlainTextResponse('Invalid host header', status_code=400)(scope, receive, send)
+
 
 # Host header allowlist. CORS below stops another origin *reading* a response,
 # but it does not stop the request being made, and this API has no
@@ -32,8 +62,14 @@ app = FastAPI(title='FuturesToolkit Web Panel')
 # header, so requiring it to name the panel itself is what actually closes it.
 # See `web.config.allowed_hosts` for how to widen this deliberately.
 _ALLOWED_HOSTS = allowed_hosts()
-if '*' not in _ALLOWED_HOSTS:
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=_ALLOWED_HOSTS)
+app.add_middleware(HostHeaderMiddleware, allowed=_ALLOWED_HOSTS)
+if '*' in _ALLOWED_HOSTS:
+    logging.getLogger('futurestoolkit.web').warning(
+        'Host header check is OFF (%s contains "*"): this panel will answer to any '
+        'hostname, including one an attacker points at it from a page the user has '
+        'open. Name the hosts you serve it under instead.', 'FT_WEB_ALLOWED_HOSTS',
+    )
+else:
     logging.getLogger('futurestoolkit.web').info(
         'Host header restricted to: %s', ', '.join(_ALLOWED_HOSTS),
     )

@@ -1261,6 +1261,51 @@ def test_allowed_hosts_reads_the_environment(monkeypatch):
     assert allowed_hosts() == list(DEFAULT_ALLOWED_HOSTS)
 
 
+def test_an_ipv6_literal_host_header_keeps_its_brackets():
+    """Splitting a Host header on its first colon leaves ``[`` for every IPv6
+    literal, so the ``[::1]`` entry the config ships answered 400 to the one
+    name it exists to allow -- the panel was unreachable at
+    ``http://[::1]:8000``."""
+    from web.config import host_allowed, normalize_host
+
+    assert normalize_host('[::1]:8000') == '[::1]'
+    assert normalize_host('[::1]') == '[::1]'
+    assert normalize_host('127.0.0.1:8000') == '127.0.0.1'
+    assert normalize_host('Localhost') == 'localhost'
+    assert normalize_host('[::1') == ''          # unterminated: matches nothing
+
+    assert host_allowed('[::1]:8000', ['localhost', '127.0.0.1', '[::1]'])
+    assert not host_allowed('[2001:db8::1]:8000', ['localhost', '127.0.0.1', '[::1]'])
+
+
+def test_host_matching_is_case_insensitive_and_honours_the_wildcards():
+    from web.config import host_allowed
+
+    assert host_allowed('PANEL.Internal:8000', ['panel.internal'])
+    assert host_allowed('anything.at.all', ['*'])
+    assert host_allowed('box.panel.internal', ['*.panel.internal'])
+    # The bare domain is not a subdomain of itself -- same rule as before.
+    assert not host_allowed('panel.internal', ['*.panel.internal'])
+    assert not host_allowed('', ['localhost'])
+
+
+def test_binding_off_loopback_derives_an_allowlist_rather_than_disabling_the_check():
+    """The Host check used to be switched off (`FT_WEB_ALLOWED_HOSTS='*'`) for
+    exactly the bind that exposes the panel to other machines. A concrete bind
+    address *is* the Host a browser sends, so it needs no guessing; a wildcard
+    bind falls back to this machine's own names, none of which an attacker's
+    rebinding page can present."""
+    import ft
+
+    assert ft._panel_allowed_hosts('192.168.1.5') == ['192.168.1.5']
+    assert ft._panel_allowed_hosts('fe80::1') == ['[fe80::1]']
+
+    wildcard = ft._panel_allowed_hosts('0.0.0.0')
+    assert '*' not in wildcard
+    assert 'localhost' in wildcard and '127.0.0.1' in wildcard
+    assert ft._panel_allowed_hosts('::') == wildcard
+
+
 def test_a_run_left_running_by_a_dead_server_is_adopted_on_reconnect(tmp_path, monkeypatch):
     """The job registry behind a ``running`` row is an in-memory dict, so a
     server that is killed mid-backtest leaves a row nothing can ever finish.

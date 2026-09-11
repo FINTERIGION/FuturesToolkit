@@ -32,7 +32,7 @@ export function RunHistory({
   onDeleted,
   openRunId,
 }: {
-  onOpen?: (runId: string) => void
+  onOpen?: (run: RunSummary) => void
   onDeleted?: (runId: string) => void
   openRunId?: string | null
 }) {
@@ -124,7 +124,7 @@ export function RunHistory({
       rowKey={(r) => r.id}
       emptyMessage={t('runs.noRuns')}
       onRowClick={(r) => {
-        if (openable(r)) onOpen?.(r.id)
+        if (openable(r)) onOpen?.(r)
       }}
       rowClassName={(r) =>
         [openRunId === r.id ? 'row-open' : '', openable(r) ? 'row-selectable' : 'row-static'].filter(Boolean).join(' ')

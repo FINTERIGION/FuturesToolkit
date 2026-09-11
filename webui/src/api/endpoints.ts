@@ -4,8 +4,6 @@ import type {
   Coverage,
   ExchangeMeta,
   JobState,
-  OptimizeReport,
-  OptimizeReportSummary,
   Product,
   ProductInput,
   RollPoint,
@@ -72,36 +70,6 @@ export interface BacktestParams {
 
 export const backtestApi = {
   start: (body: BacktestParams) => api.post<{ job_id: string; run_id: string }>('/backtest', body),
-}
-
-export interface OptimizeParams {
-  strategy: string
-  symbols: string[]
-  start: string
-  end: string
-  cash: number
-  slippage: number
-  n_trials: number
-  n_folds: number
-  embargo: number
-  holdout_frac: number
-  lambda_std: number
-  min_trades_per_year: number
-  dd_cap: number
-  sparse_penalty?: number | null
-  param_overrides: Record<string, string>
-  seed: number
-  probe_samples: number
-  study_name?: string | null
-}
-
-export const optimizeApi = {
-  start: (body: OptimizeParams) => api.post<{ job_id: string; run_id: string }>('/optimize', body),
-  reports: () => api.get<OptimizeReportSummary[]>('/optimize/reports'),
-  report: (name: string) => api.get<OptimizeReport>(`/optimize/reports/${seg(name)}`),
-  holdout: (name: string, force = false) =>
-    api.post<OptimizeReport>(`/optimize/reports/${seg(name)}/holdout?force=${force}`),
-  remove: (name: string) => api.del<{ deleted: string }>(`/optimize/reports/${seg(name)}`),
 }
 
 export const runsApi = {

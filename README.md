@@ -25,6 +25,12 @@ cd FuturesToolkit
 pip install -r requirements.txt
 ```
 
+Skip this if you only use the CLI.
+
+```bash
+pip install -e ".[web]"
+```
+
 DCE needs credentials ([apply here](http://www.dce.com.cn/dce/channel/list/7000198.html)) for historical data.
 
 ```bash
@@ -41,17 +47,10 @@ python ft.py data
 Run a backtest. Outputs (charts, trade log) land in `results/`.
 
 ```bash
-python ft.py backtest --symbols SA CF RB --start 2020-01-01 --end 2026-12-31 --strategy double_ma --cash 200000
+python ft.py backtest --symbols SA CF FG --start 2020-01-01 --end 2026-12-31 --strategy double_ma --cash 100000
 ```
 
-Tune it, then replay the winning parameters with full charts.
-
-```bash
-python ft.py optimize --strategy double_ma --symbols SA CF RB --n-trials 200
-python ft.py backtest --strategy double_ma --params-from results/optuna/..._best.json
-```
-
-Or drive all of it from the browser.
+Or drive it from the browser.
 
 ```bash
 python ft.py web

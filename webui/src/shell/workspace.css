@@ -1,0 +1,343 @@
+/* The chart workspace shell: top bar, main chart, right product sidebar,
+ * bottom drawer. Uses the existing custom-property tokens from index.css
+ * (--bg, --surface, --border, --text, --radius, --shadow, ...) plus two
+ * local ones set inline from React state: --sidebar-w, --drawer-h. */
+
+.workspace-root {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.workspace {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 1fr var(--sidebar-w, 300px);
+  grid-template-rows: 1fr var(--drawer-h, 360px);
+  background: var(--bg);
+}
+
+/* ---------- Top bar ---------- */
+
+.topbar-symbol {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 10px;
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  font-size: 13px;
+}
+
+.topbar-symbol strong {
+  font-size: 14px;
+}
+
+.topbar-symbol-name {
+  color: var(--text-muted);
+}
+
+/* ---------- Chart area ---------- */
+
+.chart-area {
+  grid-column: 1;
+  grid-row: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+}
+
+.chart-toolbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.chart-symbol-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 14px;
+}
+
+.chart-symbol-name {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.super-chart-canvas {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.drawer-resizing .super-chart-canvas {
+  /* Dragging the drawer's handle changes this pane's height continuously;
+   * suppressing chart interaction for the duration keeps a stray hover from
+   * fighting the resize (the ResizeObserver in EChart still keeps the
+   * canvas in sync, rAF-coalesced -- see components/EChart.tsx). */
+  pointer-events: none;
+}
+
+/* ---------- Product sidebar ---------- */
+
+.sidebar {
+  grid-column: 2;
+  grid-row: 1 / 3;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  box-shadow: var(--shadow);
+}
+
+.sidebar-rail {
+  grid-column: 2;
+  grid-row: 1 / 3;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 8px;
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+}
+
+.sidebar-header {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 8px;
+  padding: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.sidebar-search {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.sidebar-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.sidebar-footer {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--border);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.product-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-left: 3px solid transparent;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.product-row:hover:not(.is-charted) {
+  background: var(--surface-2);
+}
+
+.product-row.is-in-universe {
+  border-left-color: var(--border-strong);
+}
+
+.product-row.is-charted {
+  background: var(--accent-bg);
+  border-left-color: var(--accent);
+}
+
+.product-row .code {
+  font-weight: 600;
+  min-width: 32px;
+}
+
+.product-row .name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+}
+
+.product-row .row-actions {
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.product-row:hover .row-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* ---------- Bottom drawer ---------- */
+
+.bdrawer {
+  grid-column: 1;
+  grid-row: 2;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+  position: relative;
+}
+
+.bdrawer-collapsed {
+  grid-column: 1;
+  grid-row: 2;
+  height: 40px;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+}
+
+.bdrawer-collapsed .bdrawer-tabbar {
+  flex: 1 1 auto;
+  border-bottom: none;
+}
+
+.bdrawer-collapsed-label {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.bdrawer-handle {
+  position: absolute;
+  top: -4px;
+  left: 0;
+  right: 0;
+  height: 8px;
+  cursor: row-resize;
+  touch-action: none;
+  z-index: 1;
+}
+
+.bdrawer-handle::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 3px;
+  width: 40px;
+  height: 3px;
+  transform: translateX(-50%);
+  border-radius: 2px;
+  background: var(--border-strong);
+}
+
+.bdrawer-tabbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  padding: 6px 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.bdrawer-toggle {
+  font-size: 16px;
+  line-height: 1;
+  transition: transform 0.18s ease;
+}
+
+.add-product-btn {
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1;
+  padding-block: 2px;
+}
+
+.bdrawer-toggle.is-collapsed {
+  transform: rotate(180deg);
+}
+
+.bdrawer-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 14px;
+}
+
+.panel-split {
+  display: grid;
+  grid-template-columns: minmax(240px, 300px) 1fr;
+  gap: 16px;
+  align-items: start;
+  min-height: 100%;
+}
+
+.panel-rail {
+  min-width: 0;
+}
+
+.panel-main {
+  min-width: 0;
+  min-height: 0;
+}
+
+/* ---------- Narrow screens ---------- */
+
+@media (max-width: 900px) {
+  .workspace {
+    grid-template-columns: 1fr;
+    grid-template-rows: 1fr min(var(--drawer-h, 360px), 50vh);
+  }
+
+  /* The sidebar overlays the chart instead of squeezing it -- at this width
+   * a permanent 300px column would leave the chart with nothing to draw
+   * in. */
+  .sidebar {
+    position: fixed;
+    top: 44px;
+    right: 0;
+    bottom: 0;
+    width: min(300px, 80vw);
+    grid-column: unset;
+    grid-row: unset;
+    z-index: 30;
+  }
+
+  .sidebar-rail {
+    position: fixed;
+    top: 44px;
+    right: 0;
+    bottom: 0;
+    grid-column: unset;
+    grid-row: unset;
+    z-index: 30;
+  }
+
+  .chart-area,
+  .bdrawer,
+  .bdrawer-collapsed {
+    grid-column: 1;
+  }
+
+  .panel-split {
+    grid-template-columns: 1fr;
+  }
+}

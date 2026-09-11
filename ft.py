@@ -21,6 +21,7 @@ import glob
 import logging
 import os
 import re
+import socket
 import sys
 
 from datafeed.products import list_products, require_products
@@ -336,25 +337,87 @@ def cmd_holdout(args) -> None:
 # web
 # ---------------------------------------------------------------------
 
+_LOOPBACK_BINDS = ('127.0.0.1', 'localhost', '::1')
+_WILDCARD_BINDS = ('0.0.0.0', '::', '*', '')
+
+
+def _bracketed(address: str) -> str:
+    """An IPv6 literal in the form a Host header carries it."""
+    return f'[{address}]' if ':' in address and not address.startswith('[') else address
+
+
+def _local_addresses() -> list:
+    """This machine's own addresses, as another device on the LAN sees them.
+
+    A UDP socket is *connected* to a documentation-range address to make the
+    kernel pick an outbound route; no packet is sent and nothing has to be
+    reachable. That is the one way to learn the address that actually carries
+    traffic off this box -- ``gethostbyname`` answers 127.0.1.1 on a good many
+    Linux installs, which is exactly the address a remote browser will not be
+    using.
+    """
+    found = []
+    for family, probe in ((socket.AF_INET, ('192.0.2.1', 9)), (socket.AF_INET6, ('2001:db8::1', 9))):
+        try:
+            sock = socket.socket(family, socket.SOCK_DGRAM)
+            try:
+                sock.connect(probe)
+                found.append(_bracketed(sock.getsockname()[0]))
+            finally:
+                sock.close()
+        except OSError:
+            continue    # no route on this family; nothing to add
+    return found
+
+
+def _panel_allowed_hosts(bind_host: str) -> list:
+    """Host names to accept when the panel is bound to ``bind_host``.
+
+    This used to be ``'*'`` -- the check turned *off* for exactly the bind
+    that exposes the panel to other machines, which is the one where it is
+    load-bearing. Fail-open on a security control, and it left the panel
+    answering to any hostname an attacker cared to point at it.
+
+    Deriving the list instead costs nothing in the common cases. A concrete
+    bind address is the Host a browser will send, verbatim. A wildcard bind
+    cannot be read off the flag, so the machine's own addresses and hostname
+    stand in for it. Neither admits a name an attacker controls, which is
+    what a rebinding page needs.
+    """
+    host = (bind_host or '').strip()
+    if host.lower() not in _WILDCARD_BINDS:
+        return [_bracketed(host)]
+
+    from web.config import DEFAULT_ALLOWED_HOSTS
+
+    hosts = list(DEFAULT_ALLOWED_HOSTS) + _local_addresses()
+    try:
+        machine = socket.gethostname()
+    except OSError:
+        machine = ''
+    if machine and machine not in hosts:
+        hosts.append(machine)
+    return hosts
+
+
 def cmd_web(args) -> None:
     import uvicorn
 
     from web.config import ALLOWED_HOSTS_ENV
 
-    if args.host not in ('127.0.0.1', 'localhost'):
+    if args.host not in _LOOPBACK_BINDS:
         # The panel refuses a Host header it does not recognise, which is what
         # stops a web page the user has open from driving this API through
         # their browser. On loopback the defaults cover it; bound anywhere else
-        # the Host is whatever name the operator reaches the box by, and
-        # nothing here can guess that -- so stand the check down unless they
-        # named the hosts themselves, rather than serving a panel that answers
-        # nothing.
+        # the Host is whatever name the operator reaches the box by, so it is
+        # derived from the bind address rather than stood down.
         if not os.environ.get(ALLOWED_HOSTS_ENV):
-            os.environ[ALLOWED_HOSTS_ENV] = '*'
+            derived = _panel_allowed_hosts(args.host)
+            os.environ[ALLOWED_HOSTS_ENV] = ','.join(derived)
             host_note = (
-                ' The Host header check is off for this bind; set '
-                f'{ALLOWED_HOSTS_ENV} to a comma-separated list of the '
-                'hostnames you serve it under to turn it back on.'
+                f' Answering to {", ".join(derived)} only; if you reach it by some '
+                f'other name, set {ALLOWED_HOSTS_ENV} to a comma-separated list of '
+                'the hostnames you serve it under.'
             )
         else:
             host_note = f' Host header restricted to {ALLOWED_HOSTS_ENV}.'

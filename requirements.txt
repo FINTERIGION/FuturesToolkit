@@ -3,11 +3,12 @@
 # Not the full test environment: the web panel (fastapi, uvicorn, httpx) and
 # pytest are extras in pyproject.toml, and CI installs `.[test,web]` rather
 # than this file. Add web deps there, not here, or there will be two pin sets
-# to keep in step.
+# to keep in step. `pytest` was listed below in spite of that paragraph, which
+# is the one dependency this file said twice -- run `pip install -e ".[test]"`
+# for it, the same way CI does.
 pandas==3.0.1
 numpy==2.4.2
 matplotlib==3.10.8
 TA-Lib==0.7.1
-pytest==9.1.1
 optuna==4.9.0
 scipy==1.17.1

@@ -123,6 +123,29 @@ class _StopScriptedStrategy(Strategy):
             ctx.set_stop('SA', price=stop_price)
 
 
+def test_a_bracket_with_neither_price_nor_distance_is_refused():
+    """Both arguments default to None because either alone is a complete
+    instruction. Neither is not, and it used to arm nothing at all -- a
+    mistyped keyword left the position unprotected and said nothing."""
+    contracts = {'SA509': {0: (100, 101, 99, 100, 100, 0, 10)}}
+    panel = build_panel('SA', 1, weighted={'session': [1.0]}, contracts=contracts,
+                        contract_by_bar=['SA509'])
+    eng = _engine(panel, 1)
+    ctx = BarContext(eng, 0, datetime.date(2024, 1, 1))
+
+    with pytest.raises(ValueError, match='price= or distance='):
+        ctx.set_stop('SA')
+    with pytest.raises(ValueError, match='price= or distance='):
+        ctx.set_take_profit('SA')
+    assert 'SA' not in eng.stop_spec and 'SA' not in eng.tp_spec
+
+    # Either one on its own still arms, unchanged.
+    ctx.set_stop('SA', distance=5.0)
+    ctx.set_take_profit('SA', price=110.0)
+    assert eng.stop_spec['SA'] == {'distance': 5.0}
+    assert eng.tp_spec['SA'] == {'price': 110.0}
+
+
 def test_stop_is_rearmed_after_a_close_and_reopen():
     # bar0: buy + stop@90. bar2: close (flat by bar3 open). bar3: reopen with
     # a fresh stop@99. bar5 dips to low=95: only trips if the *new* stop (99)
@@ -419,6 +442,57 @@ def test_set_target_reversal_fills_in_a_single_order():
     assert still_open['direction'] == 'short'
     assert still_open['open_price'] == pytest.approx(102.0)
     assert still_open['open_at_end'] == 1
+
+
+def test_set_target_nets_out_an_order_still_deferred_from_a_dark_bar():
+    # bar1 asks for +2, bar2 is dark so that order is held over, and bar2's
+    # own signal cancels it back to flat. The deferred lots replay at bar3's
+    # open ahead of anything queued, so a target measured off `net_position`
+    # alone queues nothing and the run ends long 2 -- the opposite of the
+    # strategy's last instruction. Netting the in-flight amount out cancels
+    # the two against each other and nothing fills at all.
+    n = 5
+    price = [100.0, 101.0, 102.0, 103.0, 104.0]
+    contracts = {'SA509': {
+        i: (price[i], price[i] + 1, price[i] - 1, price[i], price[i], 5000, 900)
+        for i in range(n) if i != 2
+    }}
+    panel = build_panel(
+        'SA', n,
+        weighted={'session': [1.0, 1.0, 0.0, 1.0, 1.0], 'close': price},
+        contracts=contracts, contract_by_bar=['SA509', 'SA509', '', 'SA509', 'SA509'],
+    )
+    md = build_market({'SA': panel}, n)
+    eng = Engine(md, _ScriptedStrategy({1: 2, 2: 0}), initial_cash=100_000.0)
+    eng.run_backtest(SetupContext, BarContext)
+
+    assert eng.broker.net_position('SA') == 0
+    assert eng.signal_log == []
+    assert eng.deferred.get('SA', 0) == 0
+
+
+def test_set_target_still_reaches_a_new_target_over_a_deferred_order():
+    # Same dark bar, but bar2 raises the target to 3 instead of cancelling.
+    # Netting must queue only the missing lot, not a fresh 3 on top of the
+    # 2 already in flight.
+    n = 5
+    price = [100.0, 101.0, 102.0, 103.0, 104.0]
+    contracts = {'SA509': {
+        i: (price[i], price[i] + 1, price[i] - 1, price[i], price[i], 5000, 900)
+        for i in range(n) if i != 2
+    }}
+    panel = build_panel(
+        'SA', n,
+        weighted={'session': [1.0, 1.0, 0.0, 1.0, 1.0], 'close': price},
+        contracts=contracts, contract_by_bar=['SA509', 'SA509', '', 'SA509', 'SA509'],
+    )
+    md = build_market({'SA': panel}, n)
+    eng = Engine(md, _ScriptedStrategy({1: 2, 2: 3}), initial_cash=100_000.0)
+    eng.run_backtest(SetupContext, BarContext)
+
+    assert eng.broker.net_position('SA') == 3
+    assert len(eng.signal_log) == 1          # one fill of +3, not +2 then +3
+    assert eng.signal_log[0]['size'] == 3
 
 
 def test_signal_defers_when_the_calendar_contract_has_no_print():

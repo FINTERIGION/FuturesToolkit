@@ -23,8 +23,7 @@ npm run build         # writes to ../web/static
 | --- | --- |
 | Products | Add / edit / delete registered products; per-product candlestick chart with a roll-contract overlay |
 | Data | Coverage table (rows, date range, staleness) and a job to download/rebuild per product |
-| Backtest | Run any discovered strategy over a date range; equity curve, drawdown, position, price & signals, trade log, per-symbol and per-exit-reason breakdowns |
-| Optimize | Optuna anchored walk-forward search with a live trial-by-trial progress chart, fold scores, overfitting diagnostics, and the once-only holdout check |
+| Backtest | Run any discovered strategy over a date range; equity curve, drawdown, price & signals, trade log, per-symbol and per-exit-reason breakdowns |
 
 ## Architecture
 

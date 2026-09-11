@@ -160,6 +160,10 @@ class BarContext:
         return float(self._engine.indicators[(name, sym)][self.i])
 
     def position(self, sym: str) -> int:
+        """Lots currently held. Deliberately the *actual* exposure, so it
+        excludes any order still deferred for want of a session -- use
+        ``set_target``, which nets those out for you, rather than
+        differencing this by hand."""
         return self._engine.broker.net_position(sym)
 
     def can_trade(self, sym: str) -> bool:
@@ -209,9 +213,27 @@ class BarContext:
     def set_target(self, sym: str, lots: int) -> None:
         """Queue whatever delta is needed so the position becomes ``lots``
         after the next OPEN. Idempotent: a repeat call with the same target
-        this bar is a no-op; a later call this bar overrides an earlier one."""
+        this bar is a no-op; a later call this bar overrides an earlier one.
+
+        The delta is measured against the position *plus anything already in
+        flight*, not against the broker alone. An order the market could not
+        fill sits in ``Engine.deferred`` and replays on the next tradable
+        open, ahead of whatever is queued here -- so a target computed off
+        ``net_position`` on its own silently double-counts it. Setting a
+        target of 0 while a deferred +2 waited queued nothing at all, and the
+        deferred lots then filled anyway: the strategy's last instruction was
+        "be flat" and the run ended long 2. Subtracting the in-flight amount
+        is what makes this a target rather than a delta that happens to be
+        right whenever nothing was held over.
+
+        ``pending`` is not in the sum on purpose. It is empty by the time
+        ``on_bar`` runs -- ``Engine._open_phase`` either fills it or moves it
+        into ``deferred`` for every symbol before the signal phase starts --
+        so reading it here would be adding a term that is always zero.
+        """
         net_now = self._engine.broker.net_position(sym)
-        self._engine.queued[sym] = int(lots) - net_now
+        in_flight = self._engine.deferred.get(sym, 0)
+        self._engine.queued[sym] = int(lots) - net_now - in_flight
 
     def close(self, sym: str) -> None:
         self.set_target(sym, 0)
@@ -236,11 +258,30 @@ class BarContext:
     # and cancels the other. A bar that touches both is resolved by
     # ``Engine._bracket_hit``, which prefers the stop.
 
-    def set_stop(self, sym: str, price: Optional[float] = None, distance: Optional[float] = None) -> None:
+    @staticmethod
+    def _bracket_spec(kind: str, price: Optional[float], distance: Optional[float]) -> dict:
+        """One leg's rule, or a ``ValueError`` naming what was missing.
+
+        Both arguments default to ``None`` because either one alone is a
+        complete instruction -- but *neither* is not, and it used to fall
+        through to no spec at all. A mistyped keyword (``dist=``) or a
+        distance computed as ``None`` from an indicator that was not ready
+        therefore left the position with no protective leg, and nothing said
+        so: the strategy ran on to the next bar believing it was covered.
+        """
         if price is not None:
-            self._engine.stop_spec[sym] = {'price': float(price)}
-        elif distance is not None:
-            self._engine.stop_spec[sym] = {'distance': float(distance)}
+            return {'price': float(price)}
+        if distance is not None:
+            return {'distance': float(distance)}
+        raise ValueError(
+            f'{kind} needs either price= or distance=; got neither. Pass a '
+            f'distance wherever you can -- signals come off the weighted '
+            f'series and fills land on a real contract, and a distance is '
+            f'anchored on the fill so the basis between the two cancels.'
+        )
+
+    def set_stop(self, sym: str, price: Optional[float] = None, distance: Optional[float] = None) -> None:
+        self._engine.stop_spec[sym] = self._bracket_spec('set_stop', price, distance)
 
     def cancel_stop(self, sym: str) -> None:
         self._engine.stop_spec.pop(sym, None)
@@ -258,10 +299,7 @@ class BarContext:
         are the ones worth keeping. Which rule suits a strategy is an
         empirical question; this one is opt-in.
         """
-        if price is not None:
-            self._engine.tp_spec[sym] = {'price': float(price)}
-        elif distance is not None:
-            self._engine.tp_spec[sym] = {'distance': float(distance)}
+        self._engine.tp_spec[sym] = self._bracket_spec('set_take_profit', price, distance)
 
     def cancel_take_profit(self, sym: str) -> None:
         self._engine.tp_spec.pop(sym, None)
