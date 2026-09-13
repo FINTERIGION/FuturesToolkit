@@ -1,6 +1,6 @@
 """Background job manager for anything too slow to answer within one HTTP
-request: a backtest is quick, but an Optuna study is minutes to hours and a
-multi-symbol data download is close to an hour on a cold cache.
+request: a backtest over a long window is a minute or two, and a multi-symbol
+data download is close to an hour on a cold cache.
 
 Jobs run on a small thread pool -- pandas/numpy release the GIL for the
 heavy lifting, so this genuinely parallelizes rather than just queuing.
@@ -62,11 +62,6 @@ class Job:
     started_at: Optional[float] = None
     finished_at: Optional[float] = None
     cancel_requested: bool = False
-    # Free-form incremental telemetry a running job can append to -- e.g. the
-    # optimize router pushes one {'trial': n, 'value': v} entry per completed
-    # Optuna trial here, so the frontend can chart progress live rather than
-    # waiting for the final report (which carries only the best trial).
-    progress_data: List[dict] = dataclasses.field(default_factory=list)
     _log_seq: "itertools.count" = dataclasses.field(default_factory=itertools.count)
     _cancel_event: threading.Event = dataclasses.field(default_factory=threading.Event)
     # (event loop, queue) per open SSE stream. The loop is kept alongside the
@@ -75,24 +70,14 @@ class Job:
     _waiters: List[tuple] = dataclasses.field(default_factory=list)
     _lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
 
-    def to_dict(self, *, progress_data: bool = True) -> dict:
-        """``progress_data=False`` omits the telemetry list.
-
-        A study appends one entry per trial and never trims, so echoing the
-        whole list on every state frame made the stream quadratic in trial
-        count -- and the stream emits a state frame per trial. The SSE path
-        sends it as deltas instead; the jobs *list* has no use for it at all.
-        """
-        out = {
+    def to_dict(self) -> dict:
+        return {
             'id': self.id, 'kind': self.kind, 'status': self.status,
             'progress': self.progress, 'message': self.message,
             'error': self.error, 'created_at': self.created_at,
             'started_at': self.started_at, 'finished_at': self.finished_at,
             'cancel_requested': self.cancel_requested,
         }
-        if progress_data:
-            out['progress_data'] = list(self.progress_data)
-        return out
 
 
 class _ThreadLogHandler(logging.Handler):
@@ -127,9 +112,9 @@ class JobManager:
 
     ``cancel`` is cooperative: it sets a per-job ``threading.Event`` and a
     ``cancel_requested`` flag the callable can check between units of work
-    (an Optuna callback, a per-symbol loop in a data update). A callable
-    that never checks either just runs to completion -- cancel is a request,
-    not a kill switch, so the API surfaces it as best-effort.
+    (a per-symbol loop in a data update). A callable that never checks either
+    just runs to completion -- cancel is a request, not a kill switch, so the
+    API surfaces it as best-effort.
     """
 
     def __init__(self, max_workers: int = JOB_MAX_WORKERS):
@@ -175,11 +160,10 @@ class JobManager:
     def notify(self, job_id: str) -> None:
         """Wake any open SSE stream for ``job_id`` immediately, rather than
         waiting for the stream's own timeout. For a caller that mutates
-        ``job.progress``/``job.message``/``job.progress_data`` directly from
-        inside its own callable (e.g. the optimize router's per-trial
-        callback) -- the log handler triggers this automatically for
-        anything that goes through ``logging``, but a structured field like
-        ``progress_data`` has no log line to piggyback on.
+        ``job.progress``/``job.message`` directly from inside its own
+        callable -- the log handler triggers this automatically for anything
+        that goes through ``logging``, but a bare field update has no log line
+        to piggyback on.
         """
         job = self._jobs.get(job_id)
         if job is not None:
@@ -224,41 +208,6 @@ class JobManager:
         self._executor.submit(_run)
         return job
 
-    @contextlib.contextmanager
-    def foreground(self, kind: str):
-        """Register work that runs inside the request rather than on the pool.
-
-        ``any_active`` is what holds off a product-registry write while the
-        engine is mid-run, and it can only see what the manager knows about.
-        A handler that does its own heavy lifting synchronously is therefore
-        invisible to it -- which let a multiplier edit land in the middle of
-        a holdout evaluation, the one run whose numbers are spent exactly
-        once. Wrapping such a handler here closes that hole without turning
-        its response into a job id.
-
-        The job is created already ``running``: there is no queue to wait in,
-        the work starts the moment the block is entered.
-        """
-        job = Job(id=uuid.uuid4().hex[:12], kind=kind, status='running')
-        job.started_at = time.time()
-        with self._start_lock, self._lock:
-            self._jobs[job.id] = job
-            self._prune()
-        # Route this thread's log records into the job, same as a pooled one,
-        # so the run shows up in /api/jobs with its output rather than blank.
-        self._thread_job[threading.get_ident()] = job.id
-        try:
-            yield job
-            job.status = 'done'
-        except Exception as exc:
-            job.status = 'error'
-            job.error = str(exc)
-            raise
-        finally:
-            job.finished_at = time.time()
-            self._thread_job.pop(threading.get_ident(), None)
-            self._notify(job)
-
     def get(self, job_id: str) -> Optional[Job]:
         return self._jobs.get(job_id)
 
@@ -287,7 +236,7 @@ class JobManager:
 
         Deliberately does not wait for running jobs to finish -- callers pair
         this with ``any_active()`` and refuse, rather than blocking a request
-        behind an hour-long study.
+        behind an hour-long data update.
         """
         with self._start_lock:
             yield
@@ -320,13 +269,9 @@ class JobManager:
         # lines: past that the deque starts evicting, its length stops
         # growing, and a running total of what had been sent runs off the end
         # of it -- so the slice went permanently empty and the stream fell
-        # silent for the rest of the job, exactly on the long data-update and
-        # Optuna runs this streaming exists for.
+        # silent for the rest of the job, exactly on the long data-update
+        # runs this streaming exists for.
         last_seq = -1
-        # progress_data, unlike the log, is an unbounded list that is only
-        # ever appended to -- nothing is ever evicted from it, so a plain
-        # count of what has been sent stays valid here.
-        sent_progress = 0
         try:
             import json as _json
             while True:
@@ -350,14 +295,7 @@ class JobManager:
                     payload = _json.dumps({'type': 'log', 'level': line.level, 'message': line.message})
                     yield f'data: {payload}\n\n'
 
-                with job._lock:
-                    new_progress = job.progress_data[sent_progress:]
-                sent_progress += len(new_progress)
-                if new_progress:
-                    payload = _json.dumps({'type': 'progress_data', 'entries': new_progress})
-                    yield f'data: {payload}\n\n'
-
-                payload = _json.dumps({'type': 'state', **job.to_dict(progress_data=False)})
+                payload = _json.dumps({'type': 'state', **job.to_dict()})
                 yield f'data: {payload}\n\n'
 
                 if job.status in ('done', 'error', 'cancelled'):

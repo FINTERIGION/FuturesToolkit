@@ -45,7 +45,7 @@ describe('JobsProvider', () => {
     await user.click(screen.getByRole('button', { name: 'start' }))
     expect(MockEventSource.instances).toHaveLength(1)
 
-    MockEventSource.instances[0].emit({ type: 'state', status: 'running', progress: 0.2, message: 'Running', progress_data: [] })
+    MockEventSource.instances[0].emit({ type: 'state', status: 'running', progress: 0.2, message: 'Running' })
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('running'))
 
     // Switch away from the backtest tab (unmount) and back (remount) --
@@ -61,7 +61,7 @@ describe('JobsProvider', () => {
 
     // A frame that arrives while the panel is live again still reaches it,
     // over the same connection.
-    MockEventSource.instances[0].emit({ type: 'state', status: 'done', progress: 1, message: 'Done', progress_data: [] })
+    MockEventSource.instances[0].emit({ type: 'state', status: 'done', progress: 1, message: 'Done' })
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('done'))
     expect(MockEventSource.instances).toHaveLength(1)
   })

@@ -1,4 +1,4 @@
-"""Run-history index: a small SQLite table, one row per backtest or optimize
+"""Run-history index: a small SQLite table, one row per backtest
 run. Equity curves and trade logs are deliberately NOT stored here --
 they go to ``results/web/{run_id}.json`` (see ``web.config.WEB_RESULTS_DIR``)
 so the index stays a few KB per row and the history list is a plain
@@ -133,7 +133,7 @@ def _prune_locked(conn: sqlite3.Connection) -> None:
 
     Caller must already hold ``_lock``. The newest ``RUN_RETENTION`` rows are
     kept whatever their status, and anything older is kept anyway while it is
-    still ``running`` -- a study can outlive a few hundred quick backtests
+    still ``running`` -- a long backtest can outlive a few hundred quick ones
     queued behind it, and deleting the row it is about to ``finish_run`` would
     make that update a silent no-op.
 
@@ -244,14 +244,34 @@ def list_runs(*, kind: str = None, limit: int = 100) -> List[dict]:
     return [_row_to_dict(r) for r in rows]
 
 
+class RunInFlight(Exception):
+    """``delete_run`` was asked for a run that is still ``running``."""
+
+
 def delete_run(run_id: str) -> bool:
-    row = get_run(run_id)
-    if row is None:
-        return False
-    if row.get('artifact_path') and os.path.exists(row['artifact_path']):
-        os.remove(row['artifact_path'])
+    """Delete a finished run and its artifact; ``False`` if there is no such run.
+
+    A run still ``running`` raises ``RunInFlight`` instead. Its job is going to
+    call ``finish_run``, which writes ``results/web/{id}.json`` *before* it
+    updates the row -- so deleting the row mid-run left that file behind with
+    nothing pointing at it, out of reach of ``_prune_locked`` and of any delete
+    button, megabytes at a time. The status check and the delete run under
+    ``_lock``, the same lock ``finish_run``'s update takes, so a run cannot
+    finish in between. Artifact first, for the reason ``_prune_locked`` gives.
+    """
     with _lock:
         conn = _get_conn()
+        row = conn.execute('SELECT status, artifact_path FROM runs WHERE id=?', (run_id,)).fetchone()
+        if row is None:
+            return False
+        if row['status'] == 'running':
+            raise RunInFlight(
+                f'Run {run_id!r} is still running; wait for it to finish (or cancel its job) '
+                f'before deleting it.'
+            )
+        path = row['artifact_path']
+        if path and os.path.exists(path):
+            os.remove(path)
         conn.execute('DELETE FROM runs WHERE id=?', (run_id,))
         conn.commit()
     return True

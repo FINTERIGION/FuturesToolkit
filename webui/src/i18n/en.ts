@@ -83,6 +83,7 @@ export const en = {
   runs: {
     created: 'Created',
     deleteRunConfirm: 'Delete this {{strategy}} run permanently?',
+    deleteRunningHint: 'Still running -- it can be deleted once it finishes.',
     noRuns: 'No runs yet.',
   },
   jobs: {
@@ -94,7 +95,7 @@ export const en = {
     cancel: 'Cancel',
     reconnecting: 'Live log disconnected — polling for status',
     lost: 'Status unavailable',
-    lostHint: 'The server no longer has this job — it was restarted, or the job aged out of its history. Whatever ran may well have finished; check Past Runs or Past Reports for its result.',
+    lostHint: 'The server no longer has this job — it was restarted, or the job aged out of its history. Whatever ran may well have finished; check the run history for its result.',
   },
   workspace: {
     searchProducts: 'Search products…',
@@ -109,7 +110,7 @@ export const en = {
     noProducts: 'No products',
     noDataForSymbol: 'No data downloaded for this product yet',
     noDataForSymbolHint: 'Download its history from the product sidebar, then come back to see the chart.',
-    clearOverlay: 'Clear overlay',
+    exitBacktest: 'Exit backtest',
     runNotOnThisSymbol: 'This run does not include the charted product, so there are no fill markers to show here.',
     chartThisRunsSymbol: 'Chart {{symbol}} instead',
     tabBacktest: 'Backtest',

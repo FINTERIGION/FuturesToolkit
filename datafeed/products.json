@@ -65,11 +65,7 @@
     "name_zh": "沪银",
     "start_year": 2015,
     "main_months": [
-      2,
-      4,
       6,
-      8,
-      10,
       12
     ],
     "multiplier": 15,
@@ -83,11 +79,7 @@
     "name_zh": "沪金",
     "start_year": 2015,
     "main_months": [
-      2,
-      4,
       6,
-      8,
-      10,
       12
     ],
     "multiplier": 1000,

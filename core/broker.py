@@ -181,15 +181,25 @@ class Broker:
             return True
         return equity - after >= 0
 
-    def force_liquidate(self, bar_index: int, date: Date) -> List[Fill]:
+    def force_liquidate(
+        self, bar_index: int, date: Date,
+        price_for: Optional[Callable[[str, int, float], float]] = None,
+    ) -> List[Fill]:
         """Flatten every position at its last mark (call right after
         ``mark_to_market`` so ``last_mark`` reflects today's settle). One
-        liquidation event."""
+        liquidation event.
+
+        ``price_for(symbol, size, mark)`` turns each mark into the fill price.
+        A forced liquidation is a market order like any other, so the engine
+        passes its slippage here; the broker knows nothing about ticks. Left
+        out, the fill lands exactly on the mark.
+        """
         fills = []
         for (symbol, contract), pos in list(self.positions.items()):
-            price = pos.last_mark
+            size = -pos.size
+            price = pos.last_mark if price_for is None else price_for(symbol, size, pos.last_mark)
             f = self.fill(
-                symbol, contract, -pos.size, price, bar_index, date,
+                symbol, contract, size, price, bar_index, date,
                 reason=Reason.LIQUIDATION,
             )
             if f is not None:

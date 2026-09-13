@@ -16,7 +16,7 @@ python ft.py backtest --symbols SA CF RB --start 2020-01-01 --end 2026-12-31 --s
 | `--strategy` | A discovered short name (`--help` lists them), or a `module.path:ClassName` reference to a strategy outside this repo | `double_ma` |
 | `--slippage` | Fill slippage in ticks, applied against the order | `0` |
 | `--lots` | Lots per trade, for strategies that expose it | `1` |
-| `--params-from` | Load params from an `optimize` `*_best.json` report | — |
+| `--params-from` | Load params from a `validate` `*_validation.json` report | — |
 | `--param NAME=VALUE` | Override one param; repeatable | — |
 | `--update-data` | Refresh exchange data before running | off |
 | `--results-dir` | Output directory | `results/` |
@@ -30,9 +30,9 @@ The day loop has four phases: **OPEN → INTRABAR → SIGNAL → SETTLE**.
 | Phase | What happens |
 | --- | --- |
 | OPEN | Rolls to the new calendar contract if the map changed, fills orders queued yesterday at today's open (± slippage) **subject to the margin check below**, arms the protective bracket (stop and take-profit) |
-| INTRABAR | Bracket exits, checked against today's high/low; a level the open already gapped past fills at the open, not at the level. When one bar touches both, the **stop** wins |
+| INTRABAR | Bracket exits, checked against today's high/low; a level the open already gapped past fills at the open, not at the level. When one bar touches both, the **stop** wins. A stop fill pays slippage; a take-profit does not |
 | SIGNAL | `on_bar` runs; orders are queued, never filled on the bar that produced them |
-| SETTLE | Mark to market on settlement prices; if available margin goes negative, all positions are force-liquidated that day; if equity is still ≤ 0 after that, the account is blown up and the run stops |
+| SETTLE | Mark to market on settlement prices; if available margin goes negative, all positions are force-liquidated that day at the settle mark (± slippage); if equity is still ≤ 0 after that, the account is blown up and the run stops |
 
 Signals are computed on the OI-weighted series; fills happen on the calendar main contract for that date. A strategy never names a physical contract, and never handles a roll itself.
 
@@ -58,6 +58,8 @@ The run reports how many orders it refused. A non-zero count means the metrics d
 **A blown-up account stops the run.** If equity is still ≤ 0 at SETTLE after the forced liquidation has had its chance, the remaining bars are not traded: every one of them would be a position opened on capital that no longer exists. The summary says so above the numbers, and the metrics then cover only the truncated window.
 
 `--slippage` is quoted in **ticks**, not price points: each fill is moved against the order by `slippage × tick_size`, with `tick_size` read per product from the same registry. One setting therefore means the same thing across the universe — `--slippage 1` is one minimum price increment on gold (0.02) and on copper (10) alike.
+
+Every market-style fill pays it: orders at the open, both legs of a roll, a triggered stop (at its level or at a gapped open), and a forced liquidation (at the settle mark). The one exception is a take-profit, which rests at its level like a limit order and fills there, or at a better gapped open, unslipped.
 
 ## Outputs
 

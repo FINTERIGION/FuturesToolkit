@@ -1,7 +1,8 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { productsApi, runsApi, strategiesApi } from '../api/endpoints'
+import { backtestApi, jobsApi, productsApi, runsApi, strategiesApi } from '../api/endpoints'
+import { MockEventSource } from '../test/setup'
 import { PRODUCTS, STRATEGIES, renderWorkspace, runDetail, runRow } from '../test/utils'
 import { ChartWorkspace } from './ChartWorkspace'
 
@@ -119,5 +120,62 @@ describe('the product sidebar', () => {
     await user.dblClick(cfRow)
     expect(cfRow.className).toContain('is-charted')
     expect(saRow.className).not.toContain('is-charted')
+  })
+})
+
+describe('exiting a finished backtest', () => {
+  /** Run one backtest to completion, leaving its run overlaid on the chart
+   * the way the panel does on its own. */
+  async function runToCompletion(user: ReturnType<typeof userEvent.setup>) {
+    const button = await screen.findByRole('button', { name: 'Run Backtest' })
+    await waitFor(() => expect(button).toBeEnabled())
+    await user.click(button)
+
+    await waitFor(() => expect(MockEventSource.instances).toHaveLength(1))
+    MockEventSource.instances[0].emit({ type: 'state', status: 'done', progress: 1, message: 'Done' })
+
+    // The run reaches the chart: its fills are fetched for the charted
+    // product, and the toolbar offers the way back out.
+    await waitFor(() => expect(runsApi.price).toHaveBeenCalledWith('run-a', 'SA'))
+    return screen.findByRole('button', { name: 'Exit backtest' })
+  }
+
+  beforeEach(() => {
+    vi.mocked(backtestApi.start).mockResolvedValue({ job_id: 'j1', run_id: 'run-a' })
+    vi.mocked(jobsApi.get).mockResolvedValue({
+      id: 'j1', kind: 'backtest', status: 'done', progress: 1, message: 'Done', error: null,
+      created_at: 0, started_at: 0, finished_at: 0, cancel_requested: false, result: {},
+    })
+  })
+
+  it('takes the run off the chart for good, rather than letting the finished job put it straight back', async () => {
+    // The regression: the panel re-overlays a *done* job's run whenever
+    // `setRunId` is rebuilt, and react-router rebuilds it on every URL
+    // change -- including the one this very click makes. Clearing the `run`
+    // param therefore undid itself within the same click, and the button
+    // read as dead.
+    const user = userEvent.setup()
+    renderWorkspace(<ChartWorkspace />, { path: '/?symbol=SA&tab=backtest' })
+
+    await user.click(await runToCompletion(user))
+
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Exit backtest' })).not.toBeInTheDocument())
+  })
+
+  it('stays exited across later navigation that has nothing to do with the run', async () => {
+    // Same cause, later trigger: re-charting writes `symbol` to the URL,
+    // which rebuilt `setRunId` again and brought the exited run back.
+    const user = userEvent.setup()
+    renderWorkspace(<ChartWorkspace />, { path: '/?symbol=SA&tab=backtest' })
+
+    await user.click(await runToCompletion(user))
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Exit backtest' })).not.toBeInTheDocument())
+
+    const list = await screen.findByRole('listbox')
+    const cfRow = await findProductRow(list, 'CF')
+    await user.dblClick(cfRow)
+
+    expect(cfRow.className).toContain('is-charted')
+    expect(screen.queryByRole('button', { name: 'Exit backtest' })).not.toBeInTheDocument()
   })
 })

@@ -1,5 +1,5 @@
-"""Anchored walk-forward split generation with an embargo gap and a locked
-final holdout window that ``optimize`` structurally cannot see.
+"""Anchored walk-forward split generation with an embargo gap and an
+optional trailing holdout window carved off before the folds are cut.
 """
 
 from __future__ import annotations
@@ -27,8 +27,8 @@ def anchored_walk_forward(
     holdout_frac: float = 0.20,
 ) -> tuple:
     """Build ``n_folds`` anchored ``(train, valid)`` pairs over
-    ``[reserve_bars, holdout_start)``, plus a locked ``holdout`` window over
-    the trailing ``holdout_frac`` of all bars.
+    ``[reserve_bars, holdout_start)``, plus a ``holdout`` window over the
+    trailing ``holdout_frac`` of all bars.
 
     Anchored: every fold's train window starts at ``reserve_bars`` (enough
     leading history for indicator warmup) and only its end advances --
@@ -38,13 +38,16 @@ def anchored_walk_forward(
     paired valid window's start, so a position or an indicator's lookback
     can't bridge the boundary.
 
-    Callers that only need the search folds should destructure just the
-    first element (``folds, _ = anchored_walk_forward(...)``) -- the
-    holdout window is returned separately, one level up, specifically so a
-    trial loop built that way never even holds a reference to it.
+    ``holdout_frac=0.0`` is allowed and means no reserved tail: the folds
+    then span every bar after warmup, and the empty ``holdout`` window comes
+    back as ``[n_bars, n_bars)``. That is what a caller wants when nothing is
+    being *selected* on this data -- with the parameters already fixed there
+    is no search to hold a window back from, and the last fold's valid window
+    is the most recent stretch either way. A positive fraction still carves
+    the tail off first, for a caller that does have something to protect.
     """
-    if not (0.0 < holdout_frac < 1.0):
-        raise ValueError('holdout_frac must be in (0, 1)')
+    if not (0.0 <= holdout_frac < 1.0):
+        raise ValueError('holdout_frac must be in [0, 1)')
     if n_folds < 1:
         raise ValueError('n_folds must be >= 1')
     if reserve_bars < 0 or reserve_bars >= n_bars:

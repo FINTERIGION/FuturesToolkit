@@ -148,10 +148,9 @@ table.dtable {
   box-shadow: inset 0 0 0 9999px var(--accent-bg);
 }
 
-/* The row whose detail view is currently open -- the backtest results panel,
-   or the optimize report drawer. Marked with a rule on the first cell rather
-   than a fill, so it stays legible on a row that is also tinted by a
-   selection. */
+/* The row whose detail view is currently open -- the backtest results panel.
+   Marked with a rule on the first cell rather than a fill, so it stays legible
+   on a row that is also tinted by a selection. */
 .dtable tbody tr.row-open td:first-child {
   box-shadow: inset 3px 0 0 var(--accent);
 }

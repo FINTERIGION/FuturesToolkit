@@ -34,10 +34,10 @@ function renderPanel(prefill?: BacktestFieldsPrefill) {
   return renderWorkspace(<BacktestPanel prefill={prefill} />, { path: '/?symbol=SA' })
 }
 
-describe('Send to Backtest / Tune This Strategy prefill', () => {
-  it('keeps the tuned params when the remembered strategy is a different one', async () => {
+describe('prefill from a past run', () => {
+  it('keeps the prefilled params when the remembered strategy is a different one', async () => {
     // The ordinary case: the sticky strategy is whatever was run last, and the
-    // report being sent over is for something else. Applying the prefill used
+    // run being reopened used something else. Applying the prefill used
     // to change `strategyKey` after the first render, which re-ran the
     // params-reset effect and wiped exactly the params the user asked for --
     // leaving a form that looked filled in but held the strategy's defaults.
@@ -58,9 +58,9 @@ describe('Send to Backtest / Tune This Strategy prefill', () => {
     expect(paramInput('atr_mult')).toHaveValue(4.25)
   })
 
-  it('carries the cost assumptions the study was tuned under', async () => {
-    // Without these the run reproduces nothing: the panel's own defaults are
-    // 200000 / 0, and a report tuned at 100000 / 1.0 is a different backtest.
+  it('carries the cost assumptions the run was made under', async () => {
+    // Without these the rerun reproduces nothing: the panel's own defaults are
+    // 200000 / 0, and a run made at 100000 / 1.5 is a different backtest.
     localStorage.setItem('ft.cash', JSON.stringify(200000))
     localStorage.setItem('ft.slippage', JSON.stringify(0))
 

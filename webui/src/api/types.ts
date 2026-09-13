@@ -189,9 +189,6 @@ export interface JobState {
   started_at: number | null
   finished_at: number | null
   cancel_requested: boolean
-  /** Present on GET /api/jobs/{id}; the SSE stream sends it as separate
-   * delta frames instead, which useJob accumulates back into this field. */
-  progress_data: Array<{ trial: number; value: number }>
   result?: unknown
 }
 

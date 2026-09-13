@@ -23,6 +23,13 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_TRADING_DAYS_PER_YEAR = 252
 
+# Every Sharpe and Sortino in this project is an *excess* ratio over this rate.
+# Named rather than left as a bare default because anything computing a Sharpe
+# outside this module -- `research.overfit.block_bootstrap` resampling the same
+# return series -- has to subtract the same thing, or the report carries two
+# numbers that look comparable and are not.
+DEFAULT_RISK_FREE_RATE = 0.03
+
 
 def compute_metrics(
     equity_records: List[dict],
@@ -31,7 +38,7 @@ def compute_metrics(
     liquidation_count: int = 0,
     rejected_count: int = 0,
     blown_up: bool = False,
-    risk_free_rate: float = 0.03,
+    risk_free_rate: float = DEFAULT_RISK_FREE_RATE,
 ) -> dict:
     if not equity_records:
         return {}
@@ -43,7 +50,7 @@ def compute_metrics(
     equities = np.array([r['equity'] for r in equity_records], dtype=float)
     dates = [r['date'] for r in equity_records]
 
-    trading_days_per_year = _annualization_factor(dates)
+    trading_days_per_year = annualization_factor(dates)
     risk_free_daily = risk_free_rate / trading_days_per_year
     excess = dr - risk_free_daily
 
@@ -172,7 +179,7 @@ def compute_metrics(
     }
 
 
-def _annualization_factor(dates: List[Date]) -> float:
+def annualization_factor(dates: List[Date]) -> float:
     if len(dates) < 2:
         return _DEFAULT_TRADING_DAYS_PER_YEAR
     span_days = (dates[-1] - dates[0]).days

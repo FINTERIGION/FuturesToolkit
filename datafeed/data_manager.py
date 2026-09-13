@@ -278,6 +278,31 @@ class DataManager:
             frames[name] = frame
         return frames
 
+    @staticmethod
+    def _drop_priceless_rows(raw: pd.DataFrame, symbol: str) -> pd.DataFrame:
+        """Drop contract rows missing any of open/high/low/close.
+
+        SHFE lists every contract every day, and on a day one did not trade it
+        publishes close and settle with open/high/low left blank. Kept, such a
+        row reads as a real print: the engine fills an order or a roll at its
+        open, the NaN becomes the position's average entry, and equity is NaN
+        from then on -- which is how every risk-sized run on AG or AU died on
+        ``int(nan)``. Dropped, the day is dark for that contract, exactly like a
+        day with no row at all: nothing fills on it and an open position
+        carries its last mark.
+
+        Done before the roll calendar is built, so the calendar never names a
+        contract on a day it has no price. CZCE and DCE publish their
+        zero-volume days with a full OHLC, so this leaves them untouched: a row
+        is dropped for a missing price, never for merely not trading.
+        """
+        cols = [c for c in ('open', 'high', 'low', 'close') if c in raw.columns]
+        keep = raw[cols].notna().all(axis=1)
+        dropped = int((~keep).sum())
+        if dropped:
+            logger.debug('%s: dropped %d contract row(s) with a blank open/high/low/close', symbol, dropped)
+        return raw[keep]
+
     def _bundle_symbol(
         self,
         symbol: str,
@@ -286,7 +311,9 @@ class DataManager:
         first_print,
     ) -> dict:
         """Build the weighted series + real-contract bundle for one product."""
-        raw = annotate_expiries(self.load_contracts_dataframe(symbol))
+        raw = annotate_expiries(
+            self._drop_priceless_rows(self.load_contracts_dataframe(symbol), symbol)
+        )
         weighted_df = self._align_contract_ohlc(weighted_src, calendar)
 
         rule = roll_rule(symbol)

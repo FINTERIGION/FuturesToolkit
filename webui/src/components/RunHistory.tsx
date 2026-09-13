@@ -16,17 +16,15 @@ function formatMetric(v: unknown): string {
  * there is no separate Runs tab, so neither a kind filter nor a kind column
  * is needed here.
  *
- * Optimize runs are deliberately not listed: their durable record is the
- * report file under `results/optuna/`, which the Optimize page's Past Reports
- * list reads straight off disk. The run index could not stand in for it --
- * it is a rolling window (`RUN_RETENTION`) that drops old rows, it misses
- * studies run from the CLI entirely, and an optimize row carries no equity
- * curve, so the results panel would have nothing to draw.
+ * The index is a rolling window (`RUN_RETENTION`) over runs started from
+ * this panel, and every row carries an equity curve for the results panel to
+ * draw. A run kind that had neither -- a durable file on disk, or nothing to
+ * plot -- would not belong here.
  *
- * Rows behave like Past Reports' rows -- the row itself is the way in, and the
- * only per-row button is Delete -- but the run they open is shown in the
- * page's own results panel rather than a drawer: this detail view is a full
- * chart panel, and an overlay wide enough to hold it stops reading as one. */
+ * The row itself is the way in, and the only per-row button is Delete. The run
+ * it opens is shown in the page's own results panel rather than a drawer: this
+ * detail view is a full chart panel, and an overlay wide enough to hold it
+ * stops reading as one. */
 export function RunHistory({
   onOpen,
   onDeleted,
@@ -42,6 +40,10 @@ export function RunHistory({
   const { data: runs, isLoading } = useQuery({
     queryKey: ['runs', 'backtest'],
     queryFn: () => runsApi.list('backtest'),
+    // Nothing else refreshes this list when a run finishes, and a `running`
+    // row cannot be deleted -- so while one is listed, poll until it lands
+    // rather than leave its Delete button disabled on a stale status.
+    refetchInterval: (query) => (query.state.data?.some((r) => r.status === 'running') ? 3000 : false),
   })
 
   const deleteMutation = useMutation({
@@ -104,7 +106,10 @@ export function RunHistory({
             e.stopPropagation()
             deleteRun(r)
           }}
-          disabled={deleteMutation.isPending}
+          // A running row's job has yet to write its artifact, and the server
+          // refuses the delete (409) until it has -- so it is not offered.
+          disabled={deleteMutation.isPending || r.status === 'running'}
+          title={r.status === 'running' ? t('runs.deleteRunningHint') : undefined}
         >
           {t('common.delete')}
         </button>

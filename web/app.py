@@ -16,8 +16,11 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.datastructures import Headers
 
-from web.config import STATIC_DIR, allowed_hosts, host_allowed, is_within
-from web.routers import backtest, data, jobs, optimize, products, runs, strategies
+from web.config import (
+    DEV_ORIGINS, STATIC_DIR, UNSAFE_METHODS, allowed_hosts, allowed_origins, host_allowed,
+    is_within, write_origin_allowed,
+)
+from web.routers import backtest, data, jobs, products, runs, strategies
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(name)s %(message)s')
 
@@ -53,13 +56,39 @@ class HostHeaderMiddleware:
         await PlainTextResponse('Invalid host header', status_code=400)(scope, receive, send)
 
 
-# Host header allowlist. CORS below stops another origin *reading* a response,
-# but it does not stop the request being made, and this API has no
-# authentication: a POST or DELETE lands whether or not the attacking page can
-# see the answer. Binding to loopback does not help either -- a page the user
-# has open can resolve a hostname it owns to 127.0.0.1 and reach this process
-# from inside the browser. The one thing that request cannot forge is the Host
-# header, so requiring it to name the panel itself is what actually closes it.
+class WriteOriginMiddleware:
+    """Refuse a state-changing request a browser sent from another site.
+
+    The complement to ``HostHeaderMiddleware``. That one stops a page that
+    rebinds a hostname it owns onto this machine; this one stops a page that
+    simply addresses ``127.0.0.1`` directly, whose Host header is therefore the
+    panel's own. Reads are left alone -- CORS already keeps another origin from
+    seeing a response. ``web.config.write_origin_allowed`` owns the rule.
+    """
+
+    def __init__(self, app, allowed: list):
+        self.app = app
+        self.allowed = allowed
+
+    async def __call__(self, scope, receive, send):
+        if scope['type'] != 'http' or scope['method'] not in UNSAFE_METHODS:
+            await self.app(scope, receive, send)
+            return
+        headers = Headers(scope=scope)
+        if write_origin_allowed(
+            headers.get('origin'), headers.get('sec-fetch-site'), headers.get('host', ''), self.allowed,
+        ):
+            await self.app(scope, receive, send)
+            return
+        await PlainTextResponse('Cross-origin write refused', status_code=403)(scope, receive, send)
+
+
+# Host header allowlist. This API has no authentication, and binding to
+# loopback keeps other machines out but not other *pages*: a site the user has
+# open can resolve a hostname it owns to 127.0.0.1 and reach this process from
+# inside the browser. That request carries the attacker's hostname in its Host
+# header, so requiring the header to name the panel closes that route. It is
+# not the only route -- see the Origin check below.
 # See `web.config.allowed_hosts` for how to widen this deliberately.
 _ALLOWED_HOSTS = allowed_hosts()
 app.add_middleware(HostHeaderMiddleware, allowed=_ALLOWED_HOSTS)
@@ -74,18 +103,26 @@ else:
         'Host header restricted to: %s', ', '.join(_ALLOWED_HOSTS),
     )
 
+# Origin check on writes. A page that addresses 127.0.0.1 directly sends the
+# panel's own Host, so the check above lets it through, and CORS below does not
+# stop a request being *made* -- only its response being read. A POST with no
+# Content-Type skips the preflight altogether, and FastAPI still parses its body
+# as JSON, so without this a page the user merely had open could start jobs and
+# write the product registry. See `web.config.write_origin_allowed`.
+app.add_middleware(WriteOriginMiddleware, allowed=allowed_origins())
+
 # Dev-only: the Vite dev server runs on its own port (5173) and proxies /api
 # to this process, but the browser still sees two origins until that proxy
 # kicks in on first load. A production build is served from this same
 # process (see the static mount below), where CORS is moot.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=['http://localhost:5173', 'http://127.0.0.1:5173'],
+    allow_origins=list(DEV_ORIGINS),
     allow_methods=['*'],
     allow_headers=['*'],
 )
 
-for router in (products, data, strategies, backtest, optimize, runs, jobs):
+for router in (products, data, strategies, backtest, runs, jobs):
     app.include_router(router.router)
 
 

@@ -1,5 +1,6 @@
 """Tests for the research package: bar-index-slicing/warmup correctness,
-walk-forward splitting, and Optuna search-space resolution.
+walk-forward splitting, parameter-range resolution, and the overfitting
+checks built on top of them.
 
 Uses synthetic MarketData throughout (via tests/conftest.py's builders, plus
 a locally-built trending/cyclical series so the bundled strategies actually
@@ -23,17 +24,17 @@ from strategies import discover_strategies
 from strategies.base import BarContext, SetupContext, Strategy
 
 from research.objective import DEFAULT_SPARSE_PENALTY, _finite, score
-from research.overfit import pbo_cscv, plateau_check
-from research.optimize import run_study
+from research.overfit import block_bootstrap, deflated_sharpe_ratio, pbo_cscv, plateau_check
 from research.runner_api import run_window
 from research.space import resolve_space
 from research.splits import Window, anchored_walk_forward
+from research.validate import validate_strategy
 from research.warmup import probe_warmup
 
 from tests.conftest import build_market, build_panel, build_trending_market
 
 ALL_STRATEGIES = discover_strategies()
-TUNABLE_STRATEGIES = {
+PARAMETERIZED_STRATEGIES = {
     name: cls for name, cls in ALL_STRATEGIES.items()
     if getattr(cls, 'params', None)
 }
@@ -278,16 +279,32 @@ def test_anchored_walk_forward_rejects_infeasible_split():
         anchored_walk_forward(200, reserve_bars=50, n_folds=10, embargo=20)
 
 
+def test_anchored_walk_forward_accepts_a_zero_holdout():
+    """``ft.py validate``'s default. Holding a window back protects it from
+    selection, and nothing selects there -- the parameters arrive already
+    chosen -- so reserving a tail would only shorten the folds and hide the
+    most recent stretch, which is the one worth seeing."""
+    folds, holdout = anchored_walk_forward(1000, reserve_bars=50, n_folds=3, embargo=10,
+                                           holdout_frac=0.0)
+    assert (holdout.start, holdout.end, holdout.n_bars) == (1000, 1000, 0)
+    assert folds[-1][1].end == 1000
+
+    with pytest.raises(ValueError):
+        anchored_walk_forward(1000, reserve_bars=50, holdout_frac=1.0)
+    with pytest.raises(ValueError):
+        anchored_walk_forward(1000, reserve_bars=50, holdout_frac=-0.1)
+
+
 # ---------------------------------------------------------------------
-# Search-space resolution (parametrized over every tunable strategy)
+# Parameter-range resolution (parametrized over every strategy with params)
 # ---------------------------------------------------------------------
 
-@pytest.mark.parametrize('name', sorted(TUNABLE_STRATEGIES))
-def test_resolve_space_covers_tunable_params(name):
-    cls = TUNABLE_STRATEGIES[name]
+@pytest.mark.parametrize('name', sorted(PARAMETERIZED_STRATEGIES))
+def test_resolve_space_covers_every_declared_param(name):
+    cls = PARAMETERIZED_STRATEGIES[name]
     space = resolve_space(cls)
     fixed = set(getattr(cls, 'fixed_params', ()) or ())
-    assert space  # every bundled tunable strategy should yield a non-empty space
+    assert space  # every bundled strategy with params should yield a non-empty range set
     for key in space:
         assert key in cls.params
         assert key not in fixed
@@ -397,7 +414,7 @@ def test_sparse_penalty_dials_how_much_thin_evidence_counts():
 
 
 # ---------------------------------------------------------------------
-# CLI param plumbing (the optimize -> full-backtest handoff)
+# CLI param plumbing (the validate -> full-backtest handoff)
 # ---------------------------------------------------------------------
 
 def test_resolve_params_precedence(tmp_path):
@@ -408,9 +425,9 @@ def test_resolve_params_precedence(tmp_path):
     from research.space import parse_param_value, resolve_params
     from strategies.double_ma import DoubleMaStrategy
 
-    report = tmp_path / 'best.json'
+    report = tmp_path / 'checked.json'
     report.write_text(_json.dumps(
-        {'best_params': {'fast_period': 9, 'slow_period': 44, 'lots': 2}}), encoding='utf-8')
+        {'params': {'fast_period': 9, 'slow_period': 44, 'lots': 2}}), encoding='utf-8')
 
     args = argparse.Namespace(params_from=str(report), lots=None, param=None)
     assert resolve_params(DoubleMaStrategy, args) == {'fast_period': 9, 'slow_period': 44, 'lots': 2}
@@ -430,96 +447,162 @@ def test_resolve_params_precedence(tmp_path):
         parse_param_value('nope')
 
 
+def test_params_from_rejects_a_report_without_params(tmp_path):
+    """The deleted search wrote ``best_params``; validate writes ``params``.
+    A file carrying neither is a wrong file, and silently running the class
+    defaults instead would hand back a backtest of something the user did not
+    ask for."""
+    import argparse
+    import json as _json
+
+    from research.space import resolve_params
+    from strategies.double_ma import DoubleMaStrategy
+
+    report = tmp_path / 'wrong.json'
+    report.write_text(_json.dumps({'best_params': {'fast_period': 9}}), encoding='utf-8')
+
+    args = argparse.Namespace(params_from=str(report), lots=None, param=None)
+    with pytest.raises(ValueError, match='params'):
+        resolve_params(DoubleMaStrategy, args)
+
+
 # ---------------------------------------------------------------------
 # End-to-end smoke tests (small, fast configurations)
 # ---------------------------------------------------------------------
 
-@pytest.mark.parametrize('name', sorted(TUNABLE_STRATEGIES))
-def test_optimize_run_study_end_to_end(name, tmp_path):
+@pytest.mark.parametrize('name', sorted(PARAMETERIZED_STRATEGIES))
+def test_validate_end_to_end(name, tmp_path):
     # Not the shared single-contract `market` fixture: a bridged calendar-
     # spread factor (e.g. `factor_carry`) needs a second live contract to
     # produce anything but an all-NaN score, which the shared fixture's one
     # unparseable contract code cannot offer -- see
     # `_multi_contract_trending_market`.
     market = _multi_contract_trending_market()
-    cls = TUNABLE_STRATEGIES[name]
-    out = run_study(
+    cls = PARAMETERIZED_STRATEGIES[name]
+    out = validate_strategy(
         strategy_cls=cls, symbols=['SA'], market=market,
-        n_trials=4, n_folds=2, probe_samples=4, results_dir=str(tmp_path),
+        n_folds=2, bootstrap_draws=50, results_dir=str(tmp_path),
     )
     report = out['report']
-    space_keys = set(report['space'])
-    assert set(report['best_params']) >= space_keys
-    assert report['holdout_evaluated'] is False
-    for key in ('is_oos_decay', 'pbo', 'dsr', 'plateau'):
-        assert key in report['diagnostics']
+
+    # Every check ran, and every one of them declared whether it flagged --
+    # `flags` is derived from that key, so a check that forgot it would drop
+    # silently out of the verdict rather than fail anything.
+    for key in ('walkforward', 'subperiod', 'sensitivity', 'bootstrap', 'pbo', 'dsr'):
+        assert key in report['checks'], key
+        assert 'warn' in report['checks'][key], key
+    assert report['flags'] == sorted(k for k, v in report['checks'].items() if v['warn'])
+
+    # The params checked are the ones reported, and they cover the declared
+    # ranges -- this is the key `backtest --params-from` reads back.
+    assert set(report['params']) >= set(report['space'])
+    assert report['grid_size'] >= 1
+
+    # Nothing in the report proposes a different parameter set. That is the
+    # property this tool replaced a search to get.
+    assert 'best_params' not in report
 
 
-def test_optimize_run_study_never_touches_holdout_bars(market, tmp_path, monkeypatch):
+def test_validate_never_backtests_the_same_candidate_twice(market, tmp_path, monkeypatch):
+    """``plateau_check`` asks for the base set first and then each neighbour,
+    and the PBO/DSR matrix needs every candidate's return series. Without
+    memoizing, the base set alone would be re-run once per dimension and each
+    neighbour twice."""
+    import research.validate as validate_mod
     from strategies.double_ma import DoubleMaStrategy
-    import research.optimize as optimize_mod
 
-    seen_windows = []
-    real_run_window = optimize_mod.run_window
+    seen = []
+    real_run_window = validate_mod.run_window
 
     def spy(market_arg, strategy_cls, params, window, **kwargs):
-        seen_windows.append(window)
+        seen.append((window.name, tuple(sorted(params.items()))))
         return real_run_window(market_arg, strategy_cls, params, window, **kwargs)
 
-    monkeypatch.setattr(optimize_mod, 'run_window', spy)
+    monkeypatch.setattr(validate_mod, 'run_window', spy)
 
-    out = run_study(
+    out = validate_strategy(
         strategy_cls=DoubleMaStrategy, symbols=['SA'], market=market,
-        n_trials=3, n_folds=2, probe_samples=3, results_dir=str(tmp_path),
+        n_folds=2, bootstrap_draws=50, results_dir=str(tmp_path),
     )
-    holdout_start = out['report']['holdout_window']['start']
-    for w in seen_windows:
-        assert w.end <= holdout_start, f"window {w} reaches into the holdout region"
+
+    full_runs = [entry for entry in seen if entry[0] == 'full']
+    assert len(full_runs) == len(set(full_runs)), 'a candidate was backtested twice'
+    assert len(full_runs) == out['report']['grid_size']
 
 
-def test_a_blown_up_trials_returns_are_not_shifted_forward_in_time(tmp_path, monkeypatch):
+def test_a_truncated_runs_returns_are_not_shifted_forward_in_time(tmp_path, monkeypatch):
     """A run that ends early is missing bars at the *tail*; one whose
     indicators outran the pad is missing them at the *head*. Zero-filling the
-    head unconditionally -- which is what this did -- slid every blown-up
-    trial's whole return series forward in time. ``pbo_cscv`` slices that same
-    axis into contiguous blocks and compares trials block by block, so a
-    shifted trial was being scored against the wrong period in every split.
+    head unconditionally slides a blown-up run's whole return series forward
+    in time. ``pbo_cscv`` slices that same axis into contiguous blocks and
+    compares rows block by block, so a shifted row is scored against the wrong
+    period in every split.
     """
-    import research.optimize as optimize_mod
+    import research.validate as validate_mod
     from strategies.double_ma import DoubleMaStrategy
 
     seen = {}
-    real_pbo = optimize_mod.pbo_cscv
+    real_pbo = validate_mod.pbo_cscv
 
     def spy(returns_matrix, **kwargs):
         seen['matrix'] = returns_matrix.copy()
         return real_pbo(returns_matrix, **kwargs)
 
-    monkeypatch.setattr(optimize_mod, 'pbo_cscv', spy)
+    monkeypatch.setattr(validate_mod, 'pbo_cscv', spy)
 
     # A trending series that collapses two thirds of the way through. The
     # crossover is long into it, and on this cash one lot is enough to take
-    # equity through zero -- so trials stop mid-window and their curves end
+    # equity through zero -- so runs stop mid-window and their curves end
     # short at the tail, which is the case that used to be mis-padded.
-    out = run_study(
+    out = validate_strategy(
         strategy_cls=DoubleMaStrategy, symbols=['AU'], market=_crashing_market(),
-        cash=30_000.0, n_trials=4, n_folds=2, probe_samples=3,
-        results_dir=str(tmp_path),
+        cash=30_000.0, n_folds=2, bootstrap_draws=50, results_dir=str(tmp_path),
     )
-    assert out['report']['n_trials_blown_up'] > 0, 'expected a blow-up to exercise this path'
+    report = out['report']
+    assert report['full_metrics']['blown_up'], 'expected a blow-up to exercise this path'
 
     matrix = seen['matrix']
-    width = out['report']['holdout_window']['start'] - out['report']['reserve_bars']
+    width = report['evaluation_window']['end'] - report['evaluation_window']['start']
     assert matrix.shape[1] == width
 
     spans = [(int(np.argmax(row != 0)), int(np.argmax(row[::-1] != 0)))
              for row in matrix if row.any()]
-    # `reserve_bars` is sized to cover the whole space's warmup, so every trial
-    # records from the window's first bar: no trial has anything to pad at the
-    # head. A blown-up one pads at the tail instead -- which is exactly what
-    # the old code put at the head, sliding the series forward by that much.
+    # `reserve_bars` covers the warmup of every candidate in the grid, so each
+    # records from the window's first bar: nothing has anything to pad at the
+    # head. A blown-up run pads at the tail instead -- which is exactly what
+    # the wrong alignment puts at the head, sliding the series forward.
     assert max(lead for lead, _ in spans) <= 2, 'returns were shifted off the window start'
     assert any(trail > 10 for _, trail in spans), 'expected a truncated tail to pad'
+
+
+def test_validate_reports_a_skipped_check_rather_than_a_silent_gap(market, tmp_path):
+    out = validate_strategy(
+        strategy_cls=ALL_STRATEGIES['double_ma'], symbols=['SA'], market=market,
+        n_folds=2, skip=('bootstrap', 'pbo'), results_dir=str(tmp_path),
+    )
+    report = out['report']
+    assert report['skipped'] == ['bootstrap', 'pbo']
+    assert 'bootstrap' not in report['checks'] and 'pbo' not in report['checks']
+    # dsr shares the grid with pbo, so skipping one must not take the other out.
+    assert 'dsr' in report['checks']
+
+    with pytest.raises(ValueError, match='Unknown check'):
+        validate_strategy(
+            strategy_cls=ALL_STRATEGIES['double_ma'], symbols=['SA'], market=market,
+            n_folds=2, skip=('bootstrp',), results_dir=str(tmp_path),
+        )
+
+
+def test_validate_refuses_params_the_strategy_itself_rejects(market, tmp_path):
+    """``double_ma`` constrains fast < slow. Validating a set that breaks the
+    constraint would run a strategy in a state it says is invalid, and every
+    neighbour of it would be filtered out, leaving a report of empty checks."""
+    with pytest.raises(ValueError, match='constraints'):
+        validate_strategy(
+            strategy_cls=ALL_STRATEGIES['double_ma'], symbols=['SA'], market=market,
+            params={'fast_period': 40, 'slow_period': 20},
+            n_folds=2, results_dir=str(tmp_path),
+        )
 
 
 def test_packaged_modules_do_not_import_top_level_scripts():
@@ -618,3 +701,85 @@ def test_pbo_declines_to_answer_for_a_window_it_cannot_split():
     result = pbo_cscv(rng.normal(0, 0.01, (6, 1)))
     assert math.isnan(result['pbo'])
     assert result['n_combinations'] == 0
+
+
+def test_deflated_sharpe_honours_an_explicit_trial_count():
+    """The whole point of ``--trials-tried``: a strategy hand-tuned over forty
+    attempts has to clear a higher bar than the dozen-odd neighbours the grid
+    happens to contain, and under-declaring it flatters the result."""
+    rng = np.random.default_rng(7)
+    matrix = rng.normal(0.0005, 0.01, (12, 500))
+
+    grid_only = deflated_sharpe_ratio(matrix, 0)
+    declared = deflated_sharpe_ratio(matrix, 0, n_trials=400)
+
+    assert grid_only['n_trials'] == 12
+    assert declared['n_trials'] == 400
+    # Both describe the same row, so the raw Sharpe is untouched; only the
+    # threshold it is measured against moves.
+    assert declared['sr_hat'] == grid_only['sr_hat']
+    assert declared['sr0'] > grid_only['sr0']
+    assert declared['dsr'] < grid_only['dsr']
+    # And the row count stays reportable, or the JSON cannot say which number
+    # the Sharpe spread was estimated from.
+    assert declared['n_candidates'] == 12
+
+
+def test_block_bootstrap_point_estimate_is_the_reports_own_sharpe(market):
+    """The report prints ``compute_metrics``' Sharpe at the top and the
+    bootstrap's point estimate below it. They describe one equity curve, so
+    they have to be one number.
+
+    They were not: ``compute_metrics`` measures Sharpe in *excess* of a 3%
+    risk-free rate and annualizes by the actual date span, and the bootstrap
+    did neither. On this fixture that read -12.03 against +6.23 -- not a near
+    miss but an opposite sign, printed eight lines apart with nothing saying
+    they were on different scales.
+    """
+    from core.metrics import annualization_factor
+    from strategies.double_ma import DoubleMaStrategy
+    from research.validate import _returns_over
+
+    window = Window('full', 25, market.n_bars)
+    out = run_window(market, DoubleMaStrategy, dict(DoubleMaStrategy.params), window,
+                     cash=100_000.0, pad=25)
+    dates = [r['date'] for r in out['result']['equity_records']]
+
+    result = block_bootstrap(
+        _returns_over(window, out), n_draws=50, block=20,
+        periods_per_year=annualization_factor(dates),
+    )
+    assert result['sharpe']['point'] == pytest.approx(out['metrics']['sharpe_ratio'], abs=1e-3)
+
+
+def test_block_bootstrap_brackets_its_own_point_estimate():
+    rng = np.random.default_rng(11)
+    returns = rng.normal(0.0008, 0.01, 800)
+
+    result = block_bootstrap(returns, n_draws=400, block=20, seed=3)
+    sharpe = result['sharpe']
+
+    assert not result['insufficient']
+    assert sharpe['ci_low'] < sharpe['point'] < sharpe['ci_high']
+    assert 0.0 <= sharpe['p_positive'] <= 1.0
+    # Drawdown is reported in percent, matching `compute_metrics`, and the
+    # observed run is one draw from the distribution rather than its worst.
+    assert 0.0 <= result['max_drawdown']['median'] <= 100.0
+    assert result['max_drawdown']['p95'] >= result['max_drawdown']['median']
+
+
+def test_block_bootstrap_on_pure_noise_cannot_call_the_sign():
+    """A zero-mean series must not come back looking like an edge: this is
+    the check that stops a flat curve reading as 'significant'."""
+    rng = np.random.default_rng(12)
+    result = block_bootstrap(rng.normal(0.0, 0.01, 1000), n_draws=500, block=20, seed=5)
+    assert 0.3 < result['sharpe']['p_positive'] < 0.7
+
+
+def test_block_bootstrap_declines_on_a_series_it_cannot_resample():
+    """Same contract as ``pbo_cscv`` on an unsplittable window: NaN plus an
+    explicit flag, so 'did not run' never reads as 'ran and found nothing'."""
+    result = block_bootstrap(np.zeros(10), n_draws=100, block=20)
+    assert result['insufficient'] is True
+    assert math.isnan(result['sharpe']['point'])
+    assert result['n_draws'] == 0

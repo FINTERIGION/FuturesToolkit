@@ -8,8 +8,6 @@ export interface LogLine {
   message: string
 }
 
-type TrialPoint = { trial: number; value: number }
-
 /** Job statuses that will never change again. Exported because JobProgress
  * needs the same list to decide whether a lost job's last known status was
  * already an answer. */
@@ -21,27 +19,21 @@ const POLL_MS = 3000
 /** Drives one job's SSE stream (see web/routers/jobs.py) and exposes its live
  * state + accumulated log.
  *
- * Two things the stream does not hand over whole:
+ * The connection itself can drop -- a restarted backend, a sleeping laptop, a
+ * proxy timing out. That used to end the job as far as the UI was concerned:
+ * `onerror` closed the stream and nothing ever asked again, so a job that had
+ * long since finished sat at "running" forever. On error we fall back to
+ * polling `jobsApi.get`, which is enough to carry progress and the terminal
+ * result even with no stream at all.
  *
- * - `progress_data` arrives as deltas. A study appends one entry per trial and
- *   never trims, so re-sending the list on every frame was quadratic in trial
- *   count. Accumulated here, so consumers still read a complete
- *   `state.progress_data` and know nothing about the wire format.
- * - The connection itself can drop -- a restarted backend, a sleeping laptop,
- *   a proxy timing out. That used to end the job as far as the UI was
- *   concerned: `onerror` closed the stream and nothing ever asked again, so a
- *   job that had long since finished sat at "running" forever. On error we
- *   fall back to polling `jobsApi.get`, which is enough to carry progress and
- *   the terminal result even with no stream at all.
- *
- *   Polling has to tell two failures apart, though. A network error means the
- *   backend may be mid-restart and is worth retrying. A 404 means the job is
- *   not coming back: the registry is an in-memory dict (see web/jobs.py), so a
- *   restart empties it, and `JobManager._prune` drops finished jobs past
- *   `JOB_RETENTION` besides. Retrying that forever polled a job that could
- *   never answer, every 3s for the life of the tab, while the UI sat on
- *   "running" -- and `isActive` stayed true, so the Run button never came
- *   back either. A 404 stops the poll and raises `lost` instead.
+ * Polling has to tell two failures apart, though. A network error means the
+ * backend may be mid-restart and is worth retrying. A 404 means the job is not
+ * coming back: the registry is an in-memory dict (see web/jobs.py), so a
+ * restart empties it, and `JobManager._prune` drops finished jobs past
+ * `JOB_RETENTION` besides. Retrying that forever polled a job that could never
+ * answer, every 3s for the life of the tab, while the UI sat on "running" --
+ * and `isActive` stayed true, so the Run button never came back either. A 404
+ * stops the poll and raises `lost` instead.
  */
 export function useJob() {
   const [jobId, setJobId] = useState<string | null>(null)
@@ -51,7 +43,6 @@ export function useJob() {
   const [lost, setLost] = useState(false)
   const sourceRef = useRef<EventSource | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const trialsRef = useRef<TrialPoint[]>([])
 
   const stopPolling = useCallback(() => {
     if (pollRef.current !== null) {
@@ -67,14 +58,10 @@ export function useJob() {
     setStreaming(false)
   }, [stopPolling])
 
-  /** Merge a server payload with the trial points accumulated so far, so the
-   * shape consumers see is the same whether it came from a stream frame
-   * (deltas, no `progress_data`) or from a plain GET (the full list). */
+  /** A stream frame and a plain GET carry the same fields, except that only
+   * the GET includes `result`. */
   const applyState = useCallback((payload: Partial<JobState> & { status: string }) => {
-    if (Array.isArray(payload.progress_data) && payload.progress_data.length >= trialsRef.current.length) {
-      trialsRef.current = payload.progress_data
-    }
-    setState({ ...(payload as JobState), progress_data: trialsRef.current })
+    setState(payload as JobState)
   }, [])
 
   const startPolling = useCallback(
@@ -105,14 +92,23 @@ export function useJob() {
     [applyState, stopPolling],
   )
 
+  /** Forget the current job outright -- stream closed, state and log dropped.
+   * `start` clears the same things before it connects; the workspace's "exit
+   * backtest" control calls it on its own, because a *finished* job is what
+   * BacktestPanel re-overlays on the chart (see its auto-overlay effect) and
+   * leaving one behind made that button undo itself. */
+  const reset = useCallback(() => {
+    stop()
+    setJobId(null)
+    setState(null)
+    setLogs([])
+    setLost(false)
+  }, [stop])
+
   const start = useCallback(
     (id: string) => {
-      stop()
+      reset()
       setJobId(id)
-      setState(null)
-      setLogs([])
-      setLost(false)
-      trialsRef.current = []
 
       const source = new EventSource(jobsApi.streamUrl(id))
       sourceRef.current = source
@@ -128,18 +124,15 @@ export function useJob() {
           const payload = JSON.parse(evt.data)
           if (payload.type === 'log') {
             setLogs((prev) => [...prev, { level: payload.level, message: payload.message }])
-          } else if (payload.type === 'progress_data') {
-            trialsRef.current = [...trialsRef.current, ...(payload.entries as TrialPoint[])]
-            setState((prev) => (prev ? { ...prev, progress_data: trialsRef.current } : prev))
           } else if (payload.type === 'state') {
             applyState(payload)
             if (TERMINAL.includes(payload.status)) {
               source.close()
               sourceRef.current = null
               setStreaming(false)
-              // The state frame deliberately excludes `result` (a backtest or
-              // optimize report can be arbitrarily large). Fetch it once, now
-              // that the job is terminal, via the GET that does include it.
+              // The state frame deliberately excludes `result` (a backtest's
+              // can be large). Fetch it once, now that the job is terminal,
+              // via the GET that does include it.
               // Failing here costs only the result: the terminal status is
               // already applied, and every panel that renders a run's numbers
               // reads them from the run store rather than from this payload.
@@ -162,7 +155,7 @@ export function useJob() {
         startPolling(id)
       }
     },
-    [applyState, startPolling, stop, stopPolling],
+    [applyState, reset, startPolling, stopPolling],
   )
 
   useEffect(() => stop, [stop])
@@ -191,6 +184,7 @@ export function useJob() {
     logs,
     start,
     cancel,
+    reset,
     /** False once the event stream has dropped and the hook is polling instead
      * -- callers can use it to explain why the log stopped growing. */
     streaming,

@@ -32,9 +32,9 @@ Start from `strategies/my_strategy.py` if you want a template.
 | Attribute | Meaning |
 | --- | --- |
 | `params` | Dict of defaults; instance values live on `self.p`, overridden via `MyStrategy(**kw)`, `--param` or `--params-from` |
-| `space` | Tunable search space, `{name: Int / Float / Categorical}` — see [Parameter Optimization](research.md) |
+| `space` | Plausible range per param, `{name: Int / Float / Categorical}` — perturbed one step by the sensitivity check, see [Overfitting Checks](validation.md) |
 | `fixed_params` | Params that must never be tuned (default `('lots',)`) |
-| `constraints` | Tuple of `callable(params) -> bool`; a trial failing any is pruned, e.g. `lambda p: p['fast_period'] < p['slow_period']` |
+| `constraints` | Tuple of `callable(params) -> bool`; a perturbed set failing any is skipped by `validate`, e.g. `lambda p: p['fast_period'] < p['slow_period']` |
 
 ## Lifecycle
 

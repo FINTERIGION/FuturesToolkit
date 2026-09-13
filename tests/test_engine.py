@@ -639,6 +639,69 @@ def test_a_roll_pays_slippage_on_both_legs():
     assert trade['gross_pnl'] == pytest.approx(-240.0)
 
 
+def _long_one_sa(bar1, slippage):
+    """SA long one lot off bar 0's open of 100, with ``bar1`` to trade into."""
+    contracts = {'SA509': {0: (100, 105, 99, 100, 100, 0, 10), 1: bar1}}
+    panel = build_panel('SA', 2, weighted={'session': [1.0, 1.0]}, contracts=contracts,
+                        contract_by_bar=['SA509', 'SA509'])
+    md = build_market({'SA': panel}, 2)
+    eng = Engine(md, _NullStrategy(), initial_cash=1_000_000.0, slippage=slippage)
+    eng.pending['SA'] = 1
+    eng._open_phase(0, datetime.date(2024, 1, 1))
+    return eng
+
+
+def test_a_triggered_stop_pays_slippage_touched_or_gapped():
+    """A stop is a market order once it trips. It used to fill exactly on its
+    level (or the gapped open), so `--slippage` never reached the exits that
+    carry most of a stop-driven strategy's losses."""
+    for bar1, expected in (
+        ((100, 101, 90, 92, 92, 0, 10), 95.0),   # touched at 97, then 2 ticks worse
+        ((80, 85, 78, 82, 82, 0, 10), 78.0),     # gapped: the open of 80, 2 ticks worse
+    ):
+        eng = _long_one_sa(bar1, slippage=2.0)
+        eng.stop_spec['SA'] = {'distance': 5.0}
+        eng._arm_brackets(0, datetime.date(2024, 1, 1))
+        assert eng.live_stop['SA']['price'] == pytest.approx(97.0)   # entry 100 + 2, less 5
+
+        eng._open_phase(1, datetime.date(2024, 1, 2))
+        eng._intrabar_phase(1, datetime.date(2024, 1, 2))
+
+        assert eng.broker.net_position('SA') == 0
+        assert eng.ledger.trades[0]['close_price'] == pytest.approx(expected)
+        assert eng.signal_log[-1]['price'] == pytest.approx(expected)
+
+
+def test_a_take_profit_fills_at_its_level_without_slippage():
+    """It rests like a limit order, so its level is its price."""
+    eng = _long_one_sa((104, 110, 103, 108, 108, 0, 10), slippage=2.0)
+    eng.tp_spec['SA'] = {'distance': 5.0}
+    eng._arm_brackets(0, datetime.date(2024, 1, 1))
+
+    eng._open_phase(1, datetime.date(2024, 1, 2))
+    eng._intrabar_phase(1, datetime.date(2024, 1, 2))
+
+    assert eng.broker.net_position('SA') == 0
+    assert eng.ledger.trades[0]['close_price'] == pytest.approx(107.0)   # entry 102 + 5
+
+
+def test_a_forced_liquidation_pays_slippage():
+    """A margin call closes at market off the settle mark, so it crosses the
+    spread like any market order: CF ticks at 5, so two ticks is 10 points."""
+    eng = _cf_engine(10_000.0, n_bars=2, closes={1: 14_000.0})
+    eng.slippage = 2.0
+    eng.pending['CF'] = 1
+    eng._open_phase(0, datetime.date(2024, 1, 1))      # long 1 at 15,000 + 10
+    eng._settle_phase(0, datetime.date(2024, 1, 1))
+    eng._settle_phase(1, datetime.date(2024, 1, 2))    # settles at 14,000: margin call
+
+    assert eng.broker.positions == {}
+    assert not eng.blown_up
+    trade = eng.ledger.trades[0]
+    assert trade['forced'] == 1
+    assert trade['close_price'] == pytest.approx(13_990.0)
+
+
 # --------------------------------------------------------------------------
 # Margin rejection and blow-up
 # --------------------------------------------------------------------------

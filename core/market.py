@@ -74,9 +74,9 @@ def slice_market(market: MarketData, start: int, end: int) -> MarketData:
     standalone :class:`MarketData` for everything downstream (``Engine``,
     strategies, indicators).
 
-    Used to carve out train/valid/holdout windows for parameter optimization
-    and walk-forward validation without ever handing a strategy a numpy view
-    that reaches past ``end``.
+    Used to carve out the walk-forward and sub-period windows ``ft.py
+    validate`` scores without ever handing a strategy a numpy view that
+    reaches past ``end``.
     """
     start = max(0, start)
     end = min(market.n_bars, end)

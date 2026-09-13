@@ -1,10 +1,13 @@
-"""Declarative parameter-space types for strategy tuning.
+"""Declarative parameter-range types.
 
-Deliberately dependency-free (no Optuna import here) so ``strategies/`` never
-has to pull in the research stack just to declare a search space. A
-``Strategy`` subclass declares its tunable surface with a class-level
+Deliberately dependency-free so ``strategies/`` never has to pull in the
+research stack just to say what range a parameter is plausible over. A
+``Strategy`` subclass declares that with a class-level
 ``space: dict[str, Int | Float | Categorical]`` alongside its existing
-``params`` defaults; ``research.space`` turns that into Optuna suggestions.
+``params`` defaults. Nothing searches those ranges: ``research.validate``
+steps one notch either side of the value in use to check the result does not
+hinge on the exact number, and the web panel's parameter editor uses the same
+bounds to flag a value typed outside them.
 """
 
 from __future__ import annotations

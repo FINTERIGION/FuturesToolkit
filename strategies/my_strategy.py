@@ -19,10 +19,11 @@ class MyStrategy(Strategy):
       3. Or add a new file under strategies/ -- it is picked up automatically
          by ``strategies.discover_strategies()`` (used by ``ft.py`` and the
          web panel), no registration needed.
-      4. Optionally declare a ``space`` alongside ``params`` to control how
-         ``ft.py optimize`` searches this strategy's parameters, e.g.
-         ``space = {'period': Int(5, 60)}``. If omitted, a space is inferred
-         from each param's default value (see ``ft.py show-space``).
+      4. Optionally declare a ``space`` alongside ``params`` to say what range
+         each one is plausible over, e.g. ``space = {'period': Int(5, 60)}``.
+         ``ft.py validate`` perturbs one step within it to check the result
+         does not depend on the exact value. If omitted, a range is inferred
+         from each param's default (see ``ft.py show-space``).
 
     Available on ``BarContext``:
       ctx.bar(sym)                  Bar(open, high, low, close, settle, volume, oi)

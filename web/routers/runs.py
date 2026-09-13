@@ -61,7 +61,10 @@ def get_run_price(run_id: str, symbol: str):
 
 @router.delete('/{run_id}')
 def delete_run(run_id: str):
-    ok = store.delete_run(run_id)
+    try:
+        ok = store.delete_run(run_id)
+    except store.RunInFlight as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
     if not ok:
         raise HTTPException(status_code=404, detail=f'Unknown run {run_id!r}')
     return {'deleted': run_id}

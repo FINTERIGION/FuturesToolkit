@@ -2,7 +2,7 @@
 
 This lives in ``core`` rather than next to the CLI that used to own it
 because it is what every other layer actually needs: ``research.runner_api``
-calls it once per trial per fold, and ``web.routers.backtest`` calls it per
+calls it once per window per parameter set, and ``web.routers.backtest`` calls it per
 request. Neither wants argparse, a results directory, or a plotter, and
 neither should have to import a top-level script to reach a function with no
 CLI in it. That import was also a packaging bug: ``pyproject.toml`` ships

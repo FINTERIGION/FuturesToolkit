@@ -13,9 +13,7 @@ router = APIRouter(prefix='/api/jobs', tags=['jobs'])
 
 @router.get('')
 def list_jobs():
-    # No progress_data: a listing shows status and progress, and carrying
-    # every study's full per-trial telemetry in it is pure weight.
-    return [j.to_dict(progress_data=False) for j in job_manager.list()]
+    return [j.to_dict() for j in job_manager.list()]
 
 
 @router.get('/{job_id}')

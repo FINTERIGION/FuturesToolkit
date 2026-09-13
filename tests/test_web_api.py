@@ -33,7 +33,7 @@ from tests.conftest import build_trending_market
 from web.app import app
 from web.config import STATIC_DIR
 from web.jobs import JobManager
-from web.schemas import BacktestRequest, DataUpdateRequest, OptimizeRequest
+from web.schemas import BacktestRequest, DataUpdateRequest
 from web.serialize import annotate_inf_metrics, jsonable
 
 _VALID_PRODUCT = {
@@ -356,117 +356,8 @@ def test_backtest_end_to_end_through_the_api(client):
     assert client.get(f'/api/runs/{run_id}').status_code == 404
 
 
-def test_optimize_run_is_persisted_into_run_history(client, tmp_path, monkeypatch):
-    import research.optimize as optimize_module
-
-    # Match tests/test_research.py's own isolation: run_study's default
-    # out_dir is `results_dir or RESULTS_DIR`, resolved as a module global at
-    # call time, so this keeps the study's SQLite db and *_best.json report
-    # out of the repo's real results/optuna/ directory.
-    monkeypatch.setattr(optimize_module, 'RESULTS_DIR', str(tmp_path))
-
-    resp = client.post('/api/optimize', json={
-        'strategy': 'double_ma',
-        'symbols': ['SA', 'CF'],
-        'start': '2020-01-01',
-        'end': '2022-01-01',
-        'cash': 100_000.0,
-        'slippage': 0.0,
-        'n_trials': 3,
-        'n_folds': 2,
-        'embargo': 10,
-        'holdout_frac': 0.2,
-        'lambda_std': 0.5,
-        'min_trades_per_year': 4.0,
-        'dd_cap': 0.35,
-        'param_overrides': {},
-        'seed': 1,
-        'probe_samples': 2,
-    })
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    job_id, run_id = body['job_id'], body['run_id']
-
-    job = None
-    for _ in range(200):
-        job = client.get(f'/api/jobs/{job_id}').json()
-        if job['status'] in ('done', 'error'):
-            break
-        time.sleep(0.1)
-    assert job['status'] == 'done', job
-    json.loads(json.dumps(job))  # strict-JSON safety, same as the backtest test
-
-    # The panel's "Send to Backtest" reproduces a report by re-running its
-    # params under the costs it was tuned with, so these two travel with it and
-    # `OptimizeReport` in webui/src/api/types.ts declares them non-optional.
-    # Dropping them here would leave that hand-off silently sending undefined.
-    report = job['result']['report']
-    assert report['cash'] == 100_000.0
-    assert report['slippage'] == 0.0
-    assert report['strategy_key'] == 'double_ma'
-
-    run = client.get(f'/api/runs/{run_id}').json()
-    assert run['kind'] == 'optimize'
-    assert run['status'] == 'done'
-    assert run['strategy'] == 'DoubleMaStrategy'
-    assert 'best_value' in run['metrics']
-
-    listing = client.get('/api/runs?kind=optimize').json()
-    assert any(r['id'] == run_id for r in listing)
-
-    resp = client.delete(f'/api/runs/{run_id}')
-    assert resp.status_code == 200
-
-
-def test_optimize_writes_a_terminal_status_when_market_loading_fails(client, monkeypatch):
-    """The run row is inserted as ``running`` before the job starts, so every
-    exit path owes it a terminal status.
-
-    ``market_cache.get`` sits *before* the study call and used to be outside
-    the router's error handling, so a failure there -- an undownloaded symbol,
-    a malformed date -- left the row at ``running`` forever:
-    ``store._prune_locked`` never deletes a running row, and the panel lists
-    only ``kind='backtest'``, so the orphan was unreachable as well as
-    immortal. The backtest router has always wrapped its whole callable; this
-    asserts optimize now does too.
-    """
-    def boom(symbols, start, end, update=False):
-        raise ValueError('no data for SA')
-
-    monkeypatch.setattr(marketcache_module.cache, 'get', boom)
-
-    body = client.post('/api/optimize', json={
-        'strategy': 'double_ma', 'symbols': ['SA'],
-        'start': '2020-01-01', 'end': '2022-01-01',
-        'cash': 100_000.0, 'slippage': 0.0, 'n_trials': 2, 'n_folds': 2,
-        'embargo': 10, 'holdout_frac': 0.2, 'lambda_std': 0.5,
-        'min_trades_per_year': 4.0, 'dd_cap': 0.35, 'param_overrides': {},
-        'seed': 1, 'probe_samples': 2,
-    }).json()
-
-    for _ in range(200):
-        job = client.get(f"/api/jobs/{body['job_id']}").json()
-        if job['status'] in ('done', 'error'):
-            break
-        time.sleep(0.1)
-    assert job['status'] == 'error'
-
-    run = client.get(f"/api/runs/{body['run_id']}").json()
-    assert run['status'] == 'error', 'the run row was left mid-flight'
-    assert 'no data for SA' in run['error']
-
-    # And being terminal, it is now something the retention prune can reclaim.
-    stale = store_module.list_runs(kind='optimize')
-    assert all(r['status'] != 'running' for r in stale)
-
-
 @pytest.mark.parametrize('path, model, extra', [
     ('/api/backtest', BacktestRequest, {}),
-    ('/api/optimize', OptimizeRequest, {
-        'n_trials': 2, 'n_folds': 2, 'embargo': 10, 'holdout_frac': 0.2,
-        'lambda_std': 0.5, 'min_trades_per_year': 4.0, 'dd_cap': 0.35,
-        'param_overrides': {}, 'seed': 1, 'probe_samples': 2,
-    }),
 ])
 def test_negative_slippage_is_refused(client, path, model, extra):
     """Slippage is a cost, so it can only move a fill against you. A negative
@@ -492,7 +383,7 @@ def test_negative_slippage_is_refused(client, path, model, extra):
     assert model(**base, **extra).slippage == 0.0
 
 
-@pytest.mark.parametrize('path', ['/api/backtest', '/api/optimize'])
+@pytest.mark.parametrize('path', ['/api/backtest'])
 def test_an_empty_symbol_list_is_a_422_not_a_500(client, path):
     """``require_products`` reports an unknown product as ``KeyError`` but an
     empty list as ``ValueError``, and both handlers used to catch only the
@@ -568,87 +459,6 @@ def test_a_run_that_starts_insolvent_is_reported_as_blown_up(client):
     assert job['status'] == 'done'
     assert job['result']['metrics']['blown_up'] is False
 
-
-def test_report_delete_removes_only_the_report_json(client, tmp_path, monkeypatch):
-    """The router binds ``RESULTS_DIR`` under its own name at import time, so
-    the directory has to be patched on the router module -- patching
-    ``research.optimize.RESULTS_DIR`` (what the run_study test above does)
-    would leave list/get/delete still pointed at the repo's real
-    ``results/optuna/``.
-    """
-    import web.routers.optimize as optimize_router
-
-    monkeypatch.setattr(optimize_router, 'OPTUNA_RESULTS_DIR', str(tmp_path))
-
-    for name, evaluated in (('DoubleMa_20250101_best.json', False), ('DoubleMa_20250102_best.json', True)):
-        (tmp_path / name).write_text(json.dumps({
-            'strategy': 'DoubleMaStrategy', 'symbols': ['SA'], 'timestamp': name.split('_')[1],
-            'best_value': 1.5, 'holdout_evaluated': evaluated,
-        }), encoding='utf-8')
-    # One db backs every run of a study name, so several reports can point at
-    # it -- deleting one of them must not touch it.
-    db = tmp_path / 'DoubleMaStrategy_SA.db'
-    db.write_bytes(b'not really sqlite, but its survival is the point')
-
-    listing = client.get('/api/optimize/reports').json()
-    assert {r['name'] for r in listing} == {'DoubleMa_20250101_best.json', 'DoubleMa_20250102_best.json'}
-
-    resp = client.delete('/api/optimize/reports/DoubleMa_20250101_best.json')
-    assert resp.status_code == 200, resp.text
-    assert resp.json() == {'deleted': 'DoubleMa_20250101_best.json'}
-
-    assert not (tmp_path / 'DoubleMa_20250101_best.json').exists()
-    assert (tmp_path / 'DoubleMa_20250102_best.json').exists()
-    assert db.exists()
-
-    listing = client.get('/api/optimize/reports').json()
-    assert [r['name'] for r in listing] == ['DoubleMa_20250102_best.json']
-
-    # Gone means gone, for both the second delete and any later read.
-    assert client.delete('/api/optimize/reports/DoubleMa_20250101_best.json').status_code == 404
-    assert client.get('/api/optimize/reports/DoubleMa_20250101_best.json').status_code == 404
-
-
-def test_report_delete_answers_404_when_the_file_vanishes_mid_call(client, tmp_path, monkeypatch):
-    """``_report_path`` checks existence and ``os.remove`` acts on the answer,
-    so a second tab deleting the same report in between turned a lost race into
-    a 500 traceback. It is the same "already gone" the endpoint answers 404 for
-    when it loses the race by a wider margin."""
-    import web.routers.optimize as optimize_router
-
-    monkeypatch.setattr(optimize_router, 'OPTUNA_RESULTS_DIR', str(tmp_path))
-    (tmp_path / 'DoubleMa_20250101_best.json').write_text('{}', encoding='utf-8')
-
-    real_remove = os.remove
-
-    def vanish(path):
-        real_remove(path)                      # the other tab's delete
-        real_remove(path)                      # ours, now losing the race
-
-    monkeypatch.setattr(optimize_router.os, 'remove', vanish)
-
-    resp = client.delete('/api/optimize/reports/DoubleMa_20250101_best.json')
-    assert resp.status_code == 404, resp.text
-    assert 'DoubleMa_20250101_best.json' in resp.json()['detail']
-
-
-def test_report_delete_rejects_names_that_escape_the_results_dir(client, tmp_path, monkeypatch):
-    """``_report_path`` is the only guard between a URL segment and
-    ``os.remove``. httpx collapses ``..`` client-side, so the reachable
-    attack is a name that stays one segment: an absolute-ish or
-    separator-carrying name, or a non-report extension.
-    """
-    import web.routers.optimize as optimize_router
-
-    monkeypatch.setattr(optimize_router, 'OPTUNA_RESULTS_DIR', str(tmp_path))
-
-    victim = tmp_path / 'keepme.txt'
-    victim.write_text('untouched', encoding='utf-8')
-
-    for name in ('..%2F..%2Fdatafeed%2Fproducts.json', '..%5Cproducts.json', 'keepme.txt', 'DoubleMa_best'):
-        resp = client.delete(f'/api/optimize/reports/{name}')
-        assert resp.status_code in (400, 404), (name, resp.status_code)
-    assert victim.read_text(encoding='utf-8') == 'untouched'
 
 
 # ---------------------------------------------------------------------
@@ -734,7 +544,7 @@ def test_spa_route_still_serves_real_build_files():
 # Job log streaming
 #
 # Both defects below only appear on the long runs the SSE stream exists for
-# (a 16-symbol data update, a few-hundred-trial study) and neither shows up
+# (a 16-symbol data update, say) and neither shows up
 # as an error -- the log just stops, or arrives 15 seconds late. Short tests
 # reproduce them by shrinking the buffer instead of by running long.
 # ---------------------------------------------------------------------
@@ -908,39 +718,6 @@ def test_real_api_routes_still_win_over_the_catch_all(client):
     assert client.get('/api/products').status_code == 200
 
 
-def test_foreground_work_is_visible_to_the_active_job_check():
-    """Synchronous handlers have to register too, or the guard that holds off
-    a registry edit mid-run cannot see them -- which is how a holdout
-    evaluation, the one run whose numbers are spent exactly once, could be
-    corrupted by a multiplier edit landing halfway through."""
-    manager = JobManager(max_workers=1)
-    assert not manager.any_active()
-    with manager.foreground('holdout') as job:
-        assert manager.any_active()
-        assert job.status == 'running'
-    assert not manager.any_active()
-    assert manager.get(job.id).status == 'done'
-
-
-def test_foreground_records_a_failure_and_still_re_raises():
-    manager = JobManager(max_workers=1)
-    with pytest.raises(ValueError, match='boom'):
-        with manager.foreground('holdout') as job:
-            raise ValueError('boom')
-    assert not manager.any_active()
-    assert manager.get(job.id).status == 'error'
-    assert 'boom' in manager.get(job.id).error
-
-
-def test_product_write_is_refused_while_foreground_work_runs(client, monkeypatch):
-    """Same refusal the pooled-job test covers, for the inline path."""
-    manager = jobs_module.manager
-    with manager.foreground('holdout'):
-        resp = client.put('/api/products/SA', json=dict(_VALID_PRODUCT))
-        assert resp.status_code == 409
-        assert 'holdout' in resp.json()['detail'] or 'job is running' in resp.json()['detail'].lower()
-
-
 def test_second_update_of_the_same_symbol_is_refused(client, monkeypatch):
     """Two updates of one product write the same CSVs from independent
     fetches, so the loser silently overwrites the winner. Two pool workers
@@ -1027,64 +804,6 @@ def test_product_create_addresses_the_code_in_the_path(client):
     assert client.post('/api/products', json=_VALID_PRODUCT).status_code == 404
 
 
-def test_progress_data_is_streamed_as_deltas_not_re_sent_each_frame():
-    """A study appends one trial entry per callback and never trims, and the
-    stream emits a state frame per callback -- echoing the whole list in each
-    made the traffic quadratic in trial count. Deltas keep it linear; the
-    entries still have to arrive exactly once each, in order.
-    """
-    manager = JobManager(max_workers=1)
-    n_trials = 60
-    gate = threading.Event()
-
-    def work(job):
-        gate.wait(5)
-        for i in range(n_trials):
-            job.progress_data.append({'trial': i, 'value': float(i)})
-            manager.notify(job.id)
-            time.sleep(0.001)
-        return 'ok'
-
-    job = manager.submit('optimize', work)
-    gate.set()
-
-    import asyncio
-
-    async def drain():
-        entries, state_frames_with_list = [], 0
-        async for chunk in manager.stream(job.id):
-            for raw in chunk.split('\n'):
-                if not raw.startswith('data: '):
-                    continue
-                payload = json.loads(raw[len('data: '):])
-                if payload['type'] == 'progress_data':
-                    entries.extend(payload['entries'])
-                elif payload['type'] == 'state' and 'progress_data' in payload:
-                    state_frames_with_list += 1
-        return entries, state_frames_with_list
-
-    entries, state_frames_with_list = asyncio.run(asyncio.wait_for(drain(), 60))
-
-    assert state_frames_with_list == 0, 'state frames still carry the whole list'
-    assert [e['trial'] for e in entries] == list(range(n_trials))
-
-
-def test_jobs_listing_omits_trial_telemetry_but_the_detail_view_keeps_it(client):
-    manager = jobs_module.manager
-    job = manager.submit('optimize', lambda j: j.progress_data.append({'trial': 0, 'value': 1.0}))
-    for _ in range(200):
-        if job.status in ('done', 'error'):
-            break
-        time.sleep(0.01)
-
-    listed = next(j for j in client.get('/api/jobs').json() if j['id'] == job.id)
-    assert 'progress_data' not in listed
-    assert listed['status'] == 'done'
-
-    detail = client.get(f'/api/jobs/{job.id}').json()
-    assert detail['progress_data'] == [{'trial': 0, 'value': 1.0}]
-
-
 # ---------------------------------------------------------------------
 # A strategy name arriving over HTTP never reaches importlib
 # ---------------------------------------------------------------------
@@ -1119,17 +838,6 @@ def test_backtest_refuses_a_module_path_strategy_without_importing_it(client, tm
     assert resp.status_code == 422, resp.text
     assert not marker.exists(), 'the request body got to import a module'
     assert 'ftk_probe_backtest' not in sys.modules
-
-
-def test_optimize_refuses_a_module_path_strategy_without_importing_it(client, tmp_path, monkeypatch):
-    marker = _import_probe(tmp_path, monkeypatch, 'ftk_probe_optimize')
-    resp = client.post('/api/optimize', json={
-        'strategy': 'ftk_probe_optimize:NotAStrategy',
-        'symbols': ['SA'], 'start': '2024-01-01', 'end': '2024-06-01',
-    })
-    assert resp.status_code == 422, resp.text
-    assert not marker.exists(), 'the request body got to import a module'
-    assert 'ftk_probe_optimize' not in sys.modules
 
 
 def test_strategy_detail_refuses_a_module_path_key_without_importing_it(client, tmp_path, monkeypatch):
@@ -1184,17 +892,17 @@ def test_run_history_prunes_oldest_rows_and_their_artifact_files(monkeypatch):
 
 
 def test_run_history_prune_spares_a_run_still_in_flight(monkeypatch):
-    """A long study outlived by a few hundred quick backtests must keep its
-    row: `finish_run` updates by id, so a pruned row would turn that write
-    into a silent no-op and lose the study's result."""
+    """A slow run outlived by a few hundred quick ones must keep its row:
+    `finish_run` updates by id, so a pruned row would turn that write into a
+    silent no-op and lose the result."""
     monkeypatch.setattr(store_module, 'RUN_RETENTION', 2)
 
-    long_run = store_module.create_run(kind='optimize', strategy='Study', symbols=['SA'])
+    long_run = store_module.create_run(kind='backtest', strategy='Slow', symbols=['SA'])
     for i in range(5):
         quick = store_module.create_run(kind='backtest', strategy=f'S{i}', symbols=['SA'])
         store_module.finish_run(quick, status='done', metrics={'sharpe_ratio': i})
 
-    assert store_module.get_run(long_run) is not None, 'a running study was pruned'
+    assert store_module.get_run(long_run) is not None, 'a running job was pruned'
     store_module.finish_run(long_run, status='done', metrics={'sharpe_ratio': 9.0})
     assert store_module.get_run(long_run)['metrics']['sharpe_ratio'] == 9.0
 
@@ -1215,6 +923,55 @@ def test_run_history_limit_cannot_be_widened_past_its_cap(client):
     # The honest range still works, default included.
     assert len(client.get('/api/runs?limit=2').json()) == 2
     assert len(client.get('/api/runs').json()) == 3
+
+
+def test_a_run_still_in_flight_cannot_be_deleted(client):
+    """Deleting a running row used to succeed, and its job then wrote
+    ``results/web/{id}.json`` for a row that no longer existed -- a file that
+    neither pruning nor any delete button could ever reach again."""
+    run_id = store_module.create_run(kind='backtest', strategy='Slow', symbols=['SA'])
+
+    with pytest.raises(store_module.RunInFlight):
+        store_module.delete_run(run_id)
+    resp = client.delete(f'/api/runs/{run_id}')
+    assert resp.status_code == 409, resp.text
+    assert store_module.get_run(run_id) is not None
+
+    store_module.finish_run(run_id, status='done', metrics={'sharpe_ratio': 1.0},
+                            artifact={'equity_records': []})
+    artifact = os.path.join(store_module.WEB_RESULTS_DIR, f'{run_id}.json')
+    assert os.path.exists(artifact)
+
+    assert client.delete(f'/api/runs/{run_id}').status_code == 200
+    assert store_module.get_run(run_id) is None
+    assert not os.path.exists(artifact)
+    assert client.delete(f'/api/runs/{run_id}').status_code == 404
+
+
+def test_market_cache_hands_back_the_symbol_order_that_was_asked_for(monkeypatch):
+    """The engine fills products in load order and margin goes first come,
+    first served, so ``[SA, CF]`` and ``[CF, SA]`` are different backtests. A
+    sorted cache key served whichever order happened to be loaded first."""
+    class _Market:
+        def __init__(self, symbols):
+            self.symbols = list(symbols)
+
+    loads = []
+
+    def fake_load(symbols, start, end, update=False):
+        loads.append(list(symbols))
+        return _Market(symbols)
+
+    monkeypatch.setattr(marketcache_module, 'load_market', fake_load)
+    cache = marketcache_module.MarketCache(maxsize=4)
+
+    first = cache.get(['SA', 'CF'], '2020-01-01', '2021-01-01')
+    second = cache.get(['CF', 'SA'], '2020-01-01', '2021-01-01')
+    assert first.symbols == ['SA', 'CF']
+    assert second.symbols == ['CF', 'SA']
+    # The same order still hits the cache.
+    assert cache.get(['SA', 'CF'], '2020-01-01', '2021-01-01') is first
+    assert loads == [['SA', 'CF'], ['CF', 'SA']]
 
 
 # ---------------------------------------------------------------------
@@ -1243,6 +1000,61 @@ def test_a_foreign_host_header_is_refused():
 
     for allowed in ('http://localhost', 'http://127.0.0.1'):
         assert TestClient(app, base_url=allowed).get('/api/health').status_code == 200
+
+
+def test_a_cross_site_write_is_refused_even_with_the_panels_own_host(client):
+    """The route the Host check leaves open: a page on another site POSTs
+    straight to the panel's own address, so the Host header is legitimate.
+    Sent as a type-less Blob the body has no Content-Type, so there is no CORS
+    preflight, and FastAPI still parses it as JSON -- this request used to
+    reach the handler (here, the strategy lookup behind /api/backtest).
+    """
+    body = json.dumps({
+        'strategy': '__nope__', 'symbols': ['SA'], 'start': '2020-01-01', 'end': '2020-02-01',
+    }).encode()
+
+    for origin in ('https://evil.example', 'null', 'http://localhost:9999'):
+        resp = client.post('/api/backtest', content=body, headers={'origin': origin})
+        assert resp.status_code == 403, (origin, resp.text)
+
+    # A browser request that leaves Origin out still says it is cross-site.
+    resp = client.post('/api/backtest', content=body, headers={'sec-fetch-site': 'cross-site'})
+    assert resp.status_code == 403, resp.text
+
+    resp = client.delete('/api/runs/abc', headers={'origin': 'https://evil.example'})
+    assert resp.status_code == 403, resp.text
+
+    # The panel's own pages, the dev server, and non-browser clients all reach
+    # the handler, which then turns the unknown strategy away on its own terms.
+    for headers in (
+        {'origin': 'http://localhost'}, {'origin': 'http://localhost:5173'},
+        {'sec-fetch-site': 'same-origin'}, {},
+    ):
+        resp = client.post('/api/backtest', content=body, headers=headers)
+        assert resp.status_code == 422, (headers, resp.text)
+        assert 'Unknown strategy' in resp.text
+
+    # Reads are not gated: CORS already keeps another origin from seeing them.
+    assert client.get('/api/health', headers={'origin': 'https://evil.example'}).status_code == 200
+
+
+def test_write_origin_matching_and_the_environment(monkeypatch):
+    from web.config import ALLOWED_ORIGINS_ENV, DEV_ORIGINS, allowed_origins, write_origin_allowed
+
+    assert write_origin_allowed('http://127.0.0.1:8000', None, '127.0.0.1:8000', [])
+    assert write_origin_allowed('HTTP://LocalHost:8000/', None, 'localhost:8000', [])
+    # Same host, another port, is another origin -- any local app on it.
+    assert not write_origin_allowed('http://127.0.0.1:3000', None, '127.0.0.1:8000', [])
+    assert not write_origin_allowed('file://', None, '', [])
+    # A reverse proxy's public origin, listed explicitly.
+    assert write_origin_allowed('https://panel.example', None, '127.0.0.1:8000', ['https://Panel.example/'])
+    assert write_origin_allowed(None, 'none', 'localhost', [])
+    assert not write_origin_allowed(None, 'same-site', 'localhost', [])
+
+    monkeypatch.delenv(ALLOWED_ORIGINS_ENV, raising=False)
+    assert allowed_origins() == list(DEV_ORIGINS)
+    monkeypatch.setenv(ALLOWED_ORIGINS_ENV, 'https://Panel.example/, ,')
+    assert allowed_origins() == [*DEV_ORIGINS, 'https://panel.example']
 
 
 def test_allowed_hosts_reads_the_environment(monkeypatch):

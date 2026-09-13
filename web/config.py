@@ -3,18 +3,18 @@
 from __future__ import annotations
 
 import os
+from urllib.parse import urlsplit
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RESULTS_DIR = os.path.join(ROOT_DIR, 'results')
 WEB_RESULTS_DIR = os.path.join(RESULTS_DIR, 'web')
-OPTUNA_RESULTS_DIR = os.path.join(RESULTS_DIR, 'optuna')
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
 DB_PATH = os.path.join(RESULTS_DIR, 'webpanel.db')
 
 DEFAULT_HOST = '127.0.0.1'
 DEFAULT_PORT = 8000
 
-# Host header allowlist, enforced by TrustedHostMiddleware in `web.app`.
+# Host header allowlist, enforced by HostHeaderMiddleware in `web.app`.
 #
 # Binding to 127.0.0.1 keeps other machines out, but it does not keep a *web
 # page* out: a site the user is browsing can point a hostname it controls at
@@ -86,6 +86,66 @@ def host_allowed(raw_host: str, allowed=None) -> bool:
     return False
 
 
+# Origins the Vite dev server serves the frontend from. It proxies /api to this
+# process, so in development a browser write arrives carrying one of these
+# rather than the panel's own origin. Shared with the CORS setup in `web.app`.
+DEV_ORIGINS = ('http://localhost:5173', 'http://127.0.0.1:5173')
+ALLOWED_ORIGINS_ENV = 'FT_WEB_ALLOWED_ORIGINS'
+UNSAFE_METHODS = frozenset({'POST', 'PUT', 'PATCH', 'DELETE'})
+
+
+def _normalize_origin(origin: str) -> str:
+    return origin.strip().lower().rstrip('/')
+
+
+def allowed_origins() -> list:
+    """Origins allowed to write besides the panel's own: the dev server's,
+    plus anything listed in ``FT_WEB_ALLOWED_ORIGINS``.
+
+    The variable is for a reverse proxy that rewrites the Host header, where
+    the origin the browser reports and the Host this process sees stop
+    matching. Read at call time, like ``allowed_hosts``.
+    """
+    raw = os.environ.get(ALLOWED_ORIGINS_ENV, '')
+    return list(DEV_ORIGINS) + [_normalize_origin(o) for o in raw.split(',') if o.strip()]
+
+
+def write_origin_allowed(origin, sec_fetch_site, raw_host: str, allowed=None) -> bool:
+    """Whether a state-changing request came from the panel's own pages.
+
+    The Host check stops a rebinding page, whose requests carry the attacker's
+    hostname. It does not stop an ordinary cross-site request: a page on any
+    site can POST straight to ``http://127.0.0.1:8000``, and that request's
+    Host header is the panel's own. CORS does not stop it either. A POST whose
+    body is a type-less Blob goes out with no Content-Type, which makes it a
+    "simple" request sent without a preflight -- and FastAPI parses a body
+    with no Content-Type as JSON. A page the user merely had open could start
+    a forced re-download of every product or write one into the registry.
+
+    What such a request cannot hide is where it came from. Browsers send
+    ``Origin`` on every cross-origin POST/PUT/PATCH/DELETE, so a request that
+    carries one is accepted only when it names this panel: the same
+    ``host[:port]`` the request addressed, or an entry in ``allowed``
+    (default ``allowed_origins()``). ``Origin: null`` -- a sandboxed frame, a
+    ``no-referrer`` form -- matches neither.
+
+    No ``Origin`` at all means no browser cross-origin fetch: curl, the test
+    client, a script, all already running as someone who can reach the port.
+    ``Sec-Fetch-Site`` is the second opinion for the rare browser request that
+    leaves ``Origin`` out.
+    """
+    if origin is None:
+        return (sec_fetch_site or '').strip().lower() in ('', 'same-origin', 'none')
+    origin = _normalize_origin(origin)
+    patterns = {_normalize_origin(o) for o in (allowed if allowed is not None else allowed_origins())}
+    if origin in patterns:
+        return True
+    parts = urlsplit(origin)
+    if parts.scheme not in ('http', 'https') or not parts.netloc:
+        return False
+    return parts.netloc == (raw_host or '').strip().lower()
+
+
 MARKET_CACHE_SIZE = 3
 JOB_MAX_WORKERS = 2
 JOB_LOG_BUFFER = 2000
@@ -108,12 +168,8 @@ def is_within(path: str, root: str) -> bool:
     ``os.path.realpath`` already, so ``..`` segments and symlinks are gone by
     the time it gets here.
 
-    ``web.routers.optimize._report_path`` deliberately does not use this. It
-    guards a flat directory of generated reports, where rejecting any name
-    containing a path separator (and requiring a ``.json`` suffix) leaves
-    nothing for ``..`` to traverse *through* -- a narrower rule than
-    resolve-then-contain, and one that does not touch the filesystem to
-    decide.
+    It is the only such rule the panel needs today: every other route names
+    its file from an id the panel itself generated, never from caller text.
     """
     root = os.path.realpath(root)
     return path == root or path.startswith(root + os.sep)

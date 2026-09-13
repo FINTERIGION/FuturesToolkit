@@ -1,6 +1,6 @@
 # Web Panel
 
-A local browser UI over the same engine the CLI uses: manage the product registry, download data, run backtests and Optuna tuning with live progress and interactive charts, and browse run history. Writing or editing a strategy stays in the editor.
+A local browser UI over the same engine the CLI uses: manage the product registry, download data, run backtests with live progress and interactive charts, and browse run history. Overfitting checks stay in the CLI (`ft.py validate`). Writing or editing a strategy stays in the editor.
 
 ```bash
 pip install -e ".[web]"
@@ -16,6 +16,8 @@ npm run build         # writes to ../web/static
 ```
 
 `python ft.py web --host 0.0.0.0` binds beyond localhost; the panel has no authentication and can rewrite the product registry and delete data files, so only do this on a network you trust.
+
+Two checks stop a web page you have open from driving the API through your browser. Every request must carry a Host header naming the panel (`FT_WEB_ALLOWED_HOSTS` widens the list), and every write (POST/PUT/PATCH/DELETE) that carries an `Origin` must come from the panel's own address or the Vite dev server, or it is refused with 403. Behind a reverse proxy that rewrites the Host header, list the public origin in `FT_WEB_ALLOWED_ORIGINS`, e.g. `https://panel.example`.
 
 ## Pages
 
@@ -36,22 +38,22 @@ web/                      FastAPI backend
   store.py                  SQLite run-history index (results/webpanel.db)
   serialize.py              JSON-safe conversion (inf/NaN/date/numpy)
   schemas.py                Pydantic request models
-  routers/                  products, data, strategies, backtest, optimize, runs, jobs
+  routers/                  products, data, strategies, backtest, runs, jobs
 
 webui/                    Vite + React + TypeScript frontend
   src/api/                   Typed fetch client + endpoint functions
-  src/charts/                ECharts option builders (candlestick, equity, fold scores, ...)
+  src/charts/                ECharts option builders (candlestick, equity, drawdown, ...)
   src/components/            Card, Table, Drawer, Tabs, EChart, ParamEditor, ...
   src/pages/                 One file per page above
   src/i18n/                  en / zh resource files
 ```
 
-The backend is a thin layer: every route calls the same functions the CLI calls (`run_single_backtest`, `run_study`, `evaluate_holdout`, `DataManager`, `discover_strategies`).
+The backend is a thin layer: every route calls the same functions the CLI calls (`run_single_backtest`, `DataManager`, `discover_strategies`).
 
 ### Product registry
 
 `datafeed/products.json` is the registry — `datafeed/products.py` loads it, validates writes (`validate_product`/`save_registry`), and keeps every existing helper (`product_costs`, `roll_rule`, `list_products`, ...) unchanged.
 
-Product writes are refused with 409 while any job is running: the engine reads costs and roll rules live, per fill, so an edit landing mid-backtest would silently corrupt that run's numbers. The check and the write happen while no new job can start, so one cannot slip in between them, and work that runs inline rather than on the pool (the holdout evaluation) registers with the job manager for its duration so the guard sees it too.
+Product writes are refused with 409 while any job is running: the engine reads costs and roll rules live, per fill, so an edit landing mid-backtest would silently corrupt that run's numbers. The check and the write happen while no new job can start, so one cannot slip in between them, and any work that runs inline rather than on the pool registers with the job manager for its duration so the guard sees it too.
 
 A data update refuses with 409 if any of its symbols is already being downloaded: the two jobs write the same CSVs from independent fetches, and the loser would overwrite the winner.

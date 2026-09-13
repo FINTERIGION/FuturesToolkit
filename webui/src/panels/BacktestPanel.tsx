@@ -109,6 +109,9 @@ export function BacktestPanel({ prefill }: { prefill?: BacktestFieldsPrefill }) 
         params,
       })
       job.start(job_id)
+      // A fresh run gets its own overlay even if the server hands back an id
+      // this panel has charted before.
+      overlaidRunId.current = null
       setLastRunId(run_id)
     } catch (err) {
       setError(errorMessage(err))
@@ -116,6 +119,15 @@ export function BacktestPanel({ prefill }: { prefill?: BacktestFieldsPrefill }) 
   }
 
   const [lastRunId, setLastRunId] = useState<string | null>(null)
+  /** The run this panel has already put on the chart. Each finished run is
+   * overlaid once, by id, rather than re-applied on every render the effect
+   * below happens to re-run on: `setRunId` is rebuilt on every URL change
+   * (react-router rebuilds `setSearchParams` from the current
+   * `searchParams`), so depending on it alone re-fires the effect on
+   * navigation that has nothing to do with this run -- including the URL
+   * change made by the toolbar's own "exit backtest", which is how that
+   * button came to undo itself. */
+  const overlaidRunId = useRef<string | null>(null)
 
   // The job result carries this run's metrics, and `blown_up` among them.
   const jobMetrics = (job.state?.result as { metrics?: Record<string, unknown> } | undefined)?.metrics
@@ -127,7 +139,10 @@ export function BacktestPanel({ prefill }: { prefill?: BacktestFieldsPrefill }) 
   // keeps a run reopened from the History tab and a run just launched here
   // showing through the exact same path.
   useEffect(() => {
-    if (job.state?.status === 'done' && lastRunId) setRunId(lastRunId)
+    if (job.state?.status !== 'done' || !lastRunId) return
+    if (overlaidRunId.current === lastRunId) return
+    overlaidRunId.current = lastRunId
+    setRunId(lastRunId)
   }, [job.state?.status, lastRunId, setRunId])
 
   const { data: run } = useQuery<RunDetail>({

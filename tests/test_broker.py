@@ -86,6 +86,24 @@ def test_force_liquidation_stops_further_exposure_without_spiraling():
     assert equity_later == pytest.approx(equity_after)
 
 
+def test_force_liquidation_prices_each_fill_through_price_for():
+    """The broker knows nothing about ticks; the engine hands it the slippage."""
+    b = Broker(1_000.0)
+    b.fill('SA', 'SA509', 3, 100.0, 0, D)
+    b.mark_to_market(lambda s, c: 90.0)
+
+    seen = []
+
+    def price_for(symbol, size, mark):
+        seen.append((symbol, size, mark))
+        return mark - 2.0
+
+    fills = b.force_liquidate(1, D, price_for=price_for)
+    assert seen == [('SA', -3, 90.0)]
+    assert fills[0].price == pytest.approx(88.0)
+    assert b.positions == {}
+
+
 # --------------------------------------------------------------------------
 # Pre-trade margin check
 # --------------------------------------------------------------------------

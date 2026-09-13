@@ -45,9 +45,9 @@ def _write_registry(registry: dict) -> None:
         if job_manager.any_active():
             raise HTTPException(
                 status_code=409,
-                detail='A job is running. Product edits are held while a backtest, '
-                       'optimize, data update, or holdout evaluation is in progress, '
-                       'because the engine reads costs and roll rules live, per fill.',
+                detail='A job is running. Product edits are held while a backtest or '
+                       'data update is in progress, because the engine reads costs and '
+                       'roll rules live, per fill.',
             )
         try:
             save_registry(registry)

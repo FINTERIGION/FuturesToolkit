@@ -155,7 +155,7 @@ class Engine:
         bars that no decision of the strategy's produced -- deflating the
         window's Sharpe, volatility and capital exposure by an amount that
         varies with each parameter set's lookback, i.e. unevenly across the
-        trials of one study. ``research/runner_api.run_window`` reports the
+        parameter sets one validation run compares. ``research/runner_api.run_window`` reports the
         absolute bar this lands on as ``effective_start``.
         """
         return max(self._record_from, self.warmup_index)
@@ -215,14 +215,16 @@ class Engine:
             return False
         return int(series.live_bars[-1]) >= i
 
-    def _slipped(self, open_price: float, size: int, sym: str) -> float:
-        """Fill price after slippage, which is charged in ticks of ``sym``."""
+    def _slipped(self, price: float, size: int, sym: str) -> float:
+        """``price`` moved against an order of ``size`` by the slippage, which
+        is charged in ticks of ``sym``. Applied to every market-style fill: an
+        open, a roll leg, a triggered stop, a forced liquidation."""
         if not self.slippage:
-            return open_price
+            return price
         offset = self.slippage * tick_size(sym)
         if size > 0:
-            return open_price + offset
-        return open_price - offset
+            return price + offset
+        return price - offset
 
     def _row_for(self, sym: str, contract: str, i: int) -> Optional[np.ndarray]:
         """``contract``'s OHLCV row at bar ``i``, or None if it did not print.
@@ -591,6 +593,14 @@ class Engine:
                 continue
             fill_price, reason = hit
             fsize = -net
+            if reason == Reason.STOP:
+                # A triggered stop is a market order, touched or gapped, and
+                # pays slippage like every other market fill -- this is where
+                # it bites hardest, so leaving it out flattered every
+                # stop-driven strategy run with `--slippage`. A take-profit
+                # rests at its level like a limit order and fills there (or at
+                # a better, gapped open), so it is left unslipped.
+                fill_price = self._slipped(fill_price, fsize, sym)
             f = self.broker.fill(sym, contract, fsize, fill_price, i, date, reason=reason)
             if f:
                 self.ledger.process_fill(f)
@@ -656,7 +666,11 @@ class Engine:
         lookup = self.settle_lookup(i)
         equity, margin_used, available = self.broker.mark_to_market(lookup)
         if available < 0 and self.broker.positions:
-            liq_fills = self.broker.force_liquidate(i, date)
+            # A margin call closes at market, so it pays slippage like any
+            # other market order.
+            liq_fills = self.broker.force_liquidate(
+                i, date, price_for=lambda sym, size, mark: self._slipped(mark, size, sym),
+            )
             for f in liq_fills:
                 self.ledger.process_fill(f)
             equity, margin_used, available = self.broker.mark_to_market(lookup)

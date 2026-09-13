@@ -85,6 +85,7 @@ export const zh: TranslationSchema = {
   runs: {
     created: '创建时间',
     deleteRunConfirm: '确定永久删除这条 {{strategy}} 回测记录吗？',
+    deleteRunningHint: '回测仍在运行，结束后才能删除。',
     noRuns: '暂无记录。',
   },
   jobs: {
@@ -96,7 +97,7 @@ export const zh: TranslationSchema = {
     cancel: '取消',
     reconnecting: '实时日志已断开 — 改为轮询状态',
     lost: '状态不可用',
-    lostHint: '服务端已没有这个任务的记录——可能是重启过，或任务已超出保留数量。它实际上很可能已经跑完了，请到下方的历史记录或过往报告里查看结果。',
+    lostHint: '服务端已没有这个任务的记录——可能是重启过，或任务已超出保留数量。它实际上很可能已经跑完了，请到下方的历史记录里查看结果。',
   },
   workspace: {
     searchProducts: '搜索品种…',
@@ -111,7 +112,7 @@ export const zh: TranslationSchema = {
     noProducts: '没有品种',
     noDataForSymbol: '该品种尚未下载数据',
     noDataForSymbolHint: '请在右侧品种栏下载历史数据，然后回来查看图表。',
-    clearOverlay: '清除叠加',
+    exitBacktest: '退出回测',
     runNotOnThisSymbol: '该回测没有包含当前主图品种，因此这里没有成交标记可显示。',
     chartThisRunsSymbol: '改看 {{symbol}}',
     tabBacktest: '回测',

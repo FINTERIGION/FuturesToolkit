@@ -25,8 +25,8 @@ A contract is rolled out of on the first calendar day of the month
 ``roll_lead_months`` before its delivery month -- the 05 contract is dropped
 on April 1st. Both keys are optional; omitting them uses the module defaults
 below, so a product only needs to declare them when its cycle differs -- as
-SHFE rebar (01/05/10), silver (even months), and the non-ferrous metals (every
-month) do.
+SHFE rebar (01/05/10), gold and silver (06/12), and the non-ferrous metals
+(every month) do.
 
 Contract codes are normalised to UPPERCASE + 4-digit YYMM regardless of venue
 (``RB2610``, ``C2601``), which is what ``parse_product`` and

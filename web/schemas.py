@@ -2,7 +2,7 @@
 
 Responses are deliberately plain dicts (built by each router, run through
 ``web.serialize.jsonable``) rather than response models: the payloads mirror
-whatever the engine already returns (``compute_metrics``, Optuna reports),
+whatever the engine already returns (``compute_metrics``'s dict),
 and re-declaring their shape here would be a second copy of
 core/metrics.py's field list that drifts the moment a field is added there.
 Requests get real models because they are hand-authored by this layer and
@@ -80,24 +80,3 @@ class BacktestRequest(BaseModel):
     cash: float = 100_000.0
     slippage: float = _SLIPPAGE
     params: Dict[str, object] = Field(default_factory=dict)
-
-
-class OptimizeRequest(BaseModel):
-    strategy: str
-    symbols: List[str]
-    start: str
-    end: str
-    cash: float = 100_000.0
-    slippage: float = _SLIPPAGE
-    n_trials: int = 200
-    n_folds: int = 4
-    embargo: int = 10
-    holdout_frac: float = 0.20
-    lambda_std: float = 0.5
-    min_trades_per_year: float = 4.0
-    dd_cap: float = 0.35
-    sparse_penalty: Optional[float] = None
-    param_overrides: Dict[str, str] = Field(default_factory=dict)
-    seed: int = 42
-    probe_samples: int = 20
-    study_name: Optional[str] = None

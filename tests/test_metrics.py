@@ -14,7 +14,7 @@ import math
 import numpy as np
 import pytest
 
-from core.metrics import _annualization_factor, compute_metrics
+from core.metrics import annualization_factor, compute_metrics
 
 _RETURNS = [0.011, -0.019, 0.014, -0.006, 0.008, -0.012, 0.0, 0.021, -0.028, 0.013,
             0.004, -0.009, 0.017, -0.002, -0.015, 0.006, 0.010, -0.021, 0.009, 0.003]
@@ -50,7 +50,7 @@ def test_sortino_uses_downside_deviation_not_the_spread_of_losing_days():
     records = _records(_RETURNS)
     metrics = compute_metrics(records, [], 100_000.0)
 
-    tdy = _annualization_factor([r['date'] for r in records])
+    tdy = annualization_factor([r['date'] for r in records])
     excess = np.array(_RETURNS, dtype=float) - 0.03 / tdy
     downside_deviation = math.sqrt(float(np.mean(np.minimum(excess, 0.0) ** 2)))
     expected = excess.mean() / downside_deviation * math.sqrt(tdy)

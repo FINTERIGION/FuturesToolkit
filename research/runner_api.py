@@ -20,8 +20,8 @@ logger = logging.getLogger(__name__)
 
 def load_market(symbols, start: str, end: str, update: bool = False) -> MarketData:
     """Load the full-span ``MarketData`` once, shared read-only across every
-    trial/fold -- research code should never re-hit ``DataManager`` per
-    trial, only ``slice_market`` this one result.
+    window and parameter set -- research code should never re-hit
+    ``DataManager`` per run, only ``slice_market`` this one result.
     """
     resolved = require_products(symbols)
     dm = DataManager(symbols=resolved, update=update)
@@ -51,8 +51,8 @@ def run_window(
     became valid, which is also the bar ``equity_records[0]`` corresponds
     to. If this is later than ``window.start``, ``pad`` was too small for
     this parameter set and the window's true evaluation start slipped --
-    callers comparing scores across trials/folds should watch for this
-    rather than assume every run starts at the same point.
+    callers comparing scores across parameter sets or folds should watch for
+    this rather than assume every run starts at the same point.
 
     ``trade_logs``' ``open_bar``/``close_bar`` are remapped back to
     ``market``'s own bar numbering before returning: internally the engine
@@ -65,10 +65,10 @@ def run_window(
     not against ``window.start``: the two coincide whenever ``pad`` covers
     the strategy's warmup (the intended case), but when it does not the
     engine drops the un-tradeable head bars from the curve as well, leaving
-    the list correspondingly shorter. The *tail* can be short too: a trial
+    the list correspondingly shorter. The *tail* can be short too: a run
     whose account blows up stops on that bar, so its window ends early and its
     metrics cover only what it survived -- which is the honest score for a
-    parameter set that cannot be funded, not a reason to discard the trial.
+    parameter set that cannot be funded, not a reason to discard the run.
     """
     lo = max(0, window.start - pad)
     sliced = slice_market(market, lo, window.end)

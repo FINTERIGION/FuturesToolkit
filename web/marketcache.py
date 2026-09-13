@@ -4,8 +4,8 @@
 fine for a CLI run (one call, then the process exits) but not for a panel
 where a user tries several strategies against the same universe/date range
 back to back. ``MarketData`` is documented as a read-only, shareable object
-across trials (see ``research/runner_api.py``), so caching it here is safe
-for the same reason it is safe to share across an Optuna study's folds.
+(see ``research/runner_api.py``), so caching it here is safe for the same
+reason it is safe to share across one validation run's walk-forward folds.
 """
 
 from __future__ import annotations
@@ -33,7 +33,16 @@ class MarketCache:
 
     @staticmethod
     def _key(symbols, start: str, end: str) -> _Key:
-        return (tuple(sorted(symbols)), str(start), str(end))
+        """Symbols in the order given -- deliberately not sorted.
+
+        ``MarketData`` keeps its products in load order and the engine walks
+        them in that order, which decides who gets margin first when it binds.
+        A sorted key handed ``[CF, SA]`` whatever ``[SA, CF]`` had cached, so
+        one request could backtest differently depending on what ran before
+        it. Keyed on order, a request always gets the order it asked for --
+        the same answer ``ft.py backtest`` gives for that ``--symbols``.
+        """
+        return (tuple(symbols), str(start), str(end))
 
     def get(self, symbols, start: str, end: str, update: bool = False) -> MarketData:
         key = self._key(symbols, start, end)
